@@ -1,8 +1,8 @@
 // API Configuration
-// Auto-detect protocol and use relative path for API calls
+// Use /api prefix for all API calls (Nginx will proxy to backend)
 const API_BASE_URL = window.location.origin.includes('localhost')
     ? 'http://localhost:8000'
-    : window.location.origin;
+    : '/api';
 let authToken = localStorage.getItem('authToken');
 let refreshInterval = null;
 
