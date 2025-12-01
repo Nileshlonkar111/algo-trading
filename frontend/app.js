@@ -1,5 +1,8 @@
 // API Configuration
-const API_BASE_URL = 'http://localhost:8000';
+// Auto-detect protocol and use relative path for API calls
+const API_BASE_URL = window.location.origin.includes('localhost')
+    ? 'http://localhost:8000'
+    : window.location.origin;
 let authToken = localStorage.getItem('authToken');
 let refreshInterval = null;
 
