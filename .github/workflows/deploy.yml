@@ -1,0 +1,44 @@
+name: Deploy to EC2
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+    
+    - name: Deploy to EC2
+      uses: appleboy/ssh-action@master
+      with:
+        host: ${{ secrets.EC2_HOST }}
+        username: ${{ secrets.EC2_USERNAME }}
+        key: ${{ secrets.EC2_SSH_KEY }}
+        script: |
+          # Navigate to project directory
+          cd /home/ubuntu/algo-trading || exit 1
+          
+          # Pull latest code
+          git pull origin main
+          
+          # Backend update
+          cd backend
+          source venv/bin/activate
+          pip install -r requirements.txt
+          
+          # Restart services
+          sudo supervisorctl restart algo-trading
+          sudo systemctl reload nginx
+          
+          # Check status
+          sleep 3
+          sudo supervisorctl status algo-trading
+          
+          echo "Deployment completed successfully!"
