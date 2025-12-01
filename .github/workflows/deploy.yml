@@ -3,8 +3,7 @@ name: Deploy to EC2
 on:
   push:
     branches:
-      - main
-      - master
+      - dev
   workflow_dispatch:
 
 jobs:
@@ -26,7 +25,7 @@ jobs:
           cd /home/ubuntu/algo-trading || exit 1
           
           # Pull latest code
-          git pull origin main
+          git pull origin dev
           
           # Backend update
           cd backend

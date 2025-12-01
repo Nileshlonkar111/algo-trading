@@ -98,7 +98,7 @@ echo "# Test" >> README.md
 # Commit and push
 git add .
 git commit -m "Test CI/CD pipeline"
-git push origin main
+git push origin dev
 ```
 
 Go to GitHub → Actions tab → Watch deployment in real-time
@@ -123,7 +123,7 @@ Visit your application: `http://your-ec2-ip`
 ## Pipeline Features
 
 ### Automatic Deployment
-- Triggers on push to `main` or `master` branch
+- Triggers on push to `dev` branch
 - Can also trigger manually from GitHub Actions tab
 
 ### What It Does
@@ -184,7 +184,7 @@ If deployment breaks:
 ### Option 1: Revert Git Commit
 ```bash
 git revert HEAD
-git push origin main
+git push origin dev
 # Pipeline will auto-deploy previous version
 ```
 
@@ -241,13 +241,13 @@ For staging + production:
 # .github/workflows/deploy-staging.yml
 on:
   push:
-    branches: [develop]
+    branches: [dev]
 # Deploy to staging EC2
 
 # .github/workflows/deploy-production.yml
 on:
   push:
-    branches: [main]
+    branches: [production]
 # Deploy to production EC2
 ```
 
@@ -275,4 +275,6 @@ Each deployment takes ~1 minute, so:
 
 Your deployment pipeline is now ready! 🚀
 
-Push to GitHub → Automatic deployment to EC2 → Application updated
+**Current Branch:** `dev`
+
+Push to `dev` branch → Automatic deployment to EC2 → Application updated
