@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Backend Test</title>
+</head>
+<body>
+    <h1>Backend Connection Test</h1>
+    <button onclick="testHealth()">Test Health Endpoint</button>
+    <button onclick="testLogin()">Test Login</button>
+    <pre id="output"></pre>
+
+    <script>
+        const API_URL = 'http://localhost:8000';
+
+        async function testHealth() {
+            const output = document.getElementById('output');
+            output.textContent = 'Testing health endpoint...\n';
+            
+            try {
+                const response = await fetch(`${API_URL}/health`);
+                const data = await response.json();
+                output.textContent += 'SUCCESS: ' + JSON.stringify(data, null, 2);
+            } catch (error) {
+                output.textContent += 'ERROR: ' + error.message + '\n';
+                output.textContent += 'Make sure backend is running: python main.py';
+            }
+        }
+
+        async function testLogin() {
+            const output = document.getElementById('output');
+            output.textContent = 'Testing login endpoint...\n';
+            
+            try {
+                const response = await fetch(`${API_URL}/auth/login`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        username: 'admin',
+                        password: 'admin123'
+                    })
+                });
+                
+                const data = await response.json();
+                output.textContent += 'Response: ' + JSON.stringify(data, null, 2);
+            } catch (error) {
+                output.textContent += 'ERROR: ' + error.message + '\n';
+                output.textContent += 'Make sure backend is running on port 8000';
+            }
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+kiteconnect
+python-dotenv
+pydantic
+pandas
+python-jose[cryptography]
+python-multipart

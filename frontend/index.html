@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Algo Trading Dashboard</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div id="app">
+        <!-- Login Screen -->
+        <div id="loginScreen" class="screen">
+            <div class="login-container">
+                <h1>Algo Trading Platform</h1>
+                <form id="loginForm">
+                    <input type="text" id="username" placeholder="Username" required>
+                    <input type="password" id="password" placeholder="Password" required>
+                    <button type="submit">Login</button>
+                </form>
+                <div id="loginError" class="error"></div>
+            </div>
+        </div>
+
+        <!-- Main Dashboard -->
+        <div id="dashboardScreen" class="screen hidden">
+            <nav class="navbar">
+                <h1>Algo Trading Dashboard</h1>
+                <div class="nav-actions">
+                    <span id="username-display"></span>
+                    <button id="logoutBtn" class="btn-secondary">Logout</button>
+                </div>
+            </nav>
+
+            <div class="container">
+                <!-- Status Cards -->
+                <div class="status-cards">
+                    <div class="card">
+                        <h3>Kite Status</h3>
+                        <div id="kiteStatus" class="status-indicator">Not Connected</div>
+                        <button id="kiteLoginBtn" class="btn-primary">Setup Kite Auth</button>
+                    </div>
+                    <div class="card">
+                        <h3>Trading Status</h3>
+                        <div id="tradingStatus" class="status-indicator">Stopped</div>
+                        <button id="toggleTradingBtn" class="btn-primary">Start Trading</button>
+                    </div>
+                    <div class="card">
+                        <h3>P&L Today</h3>
+                        <div id="pnlDisplay" class="pnl-value">₹0.00</div>
+                        <div id="pnlPercent" class="pnl-percent">0.00%</div>
+                    </div>
+                    <div class="card">
+                        <h3>Open Positions</h3>
+                        <div id="openPositions" class="metric-value">0</div>
+                    </div>
+                </div>
+
+                <!-- Kite Auth Modal -->
+                <div id="kiteAuthModal" class="modal hidden">
+                    <div class="modal-content">
+                        <h2>Kite Authentication</h2>
+                        <p>Step 1: Click the button below to open Kite login</p>
+                        <button id="openKiteLoginBtn" class="btn-primary">Open Kite Login</button>
+                        <p>Step 2: After login, paste the request token here</p>
+                        <input type="text" id="requestToken" placeholder="Request Token">
+                        <button id="submitTokenBtn" class="btn-primary">Submit Token</button>
+                        <button id="closeModalBtn" class="btn-secondary">Close</button>
+                        <div id="authError" class="error"></div>
+                    </div>
+                </div>
+
+                <!-- Configuration -->
+                <div class="card">
+                    <h2>Trading Configuration</h2>
+                    <div class="config-grid">
+                        <div class="config-item">
+                            <label>Capital Base (₹)</label>
+                            <input type="number" id="capitalBase" value="300000">
+                        </div>
+                        <div class="config-item">
+                            <label>Max Concurrent Positions</label>
+                            <input type="number" id="maxPositions" value="3">
+                        </div>
+                        <div class="config-item">
+                            <label>Daily Max Loss (%)</label>
+                            <input type="number" id="maxLoss" value="-2" step="0.1">
+                        </div>
+                        <div class="config-item">
+                            <label>Daily Max Profit (%)</label>
+                            <input type="number" id="maxProfit" value="4" step="0.1">
+                        </div>
+                        <div class="config-item">
+                            <label>Lot Quantity</label>
+                            <input type="number" id="lotQty" value="75">
+                        </div>
+                    </div>
+                    <button id="updateConfigBtn" class="btn-primary">Update Configuration</button>
+                </div>
+
+                <!-- Positions -->
+                <div class="card">
+                    <h2>Open Positions</h2>
+                    <div id="positionsTable" class="table-container">
+                        <p class="no-data">No open positions</p>
+                    </div>
+                </div>
+
+                <!-- Trade Logs -->
+                <div class="card">
+                    <h2>Trade Logs</h2>
+                    <div id="tradeLogsTable" class="table-container">
+                        <p class="no-data">No trades yet</p>
+                    </div>
+                </div>
+
+                <!-- Notifications -->
+                <div class="card">
+                    <h2>Notifications & Alerts</h2>
+                    <button id="clearNotificationsBtn" class="btn-secondary">Clear All</button>
+                    <div id="notificationsList" class="notifications-list">
+                        <p class="no-data">No notifications</p>
+                    </div>
+                </div>
+
+                <!-- Emergency Actions -->
+                <div class="card emergency-section">
+                    <h2>Emergency Controls</h2>
+                    <button id="closeAllBtn" class="btn-danger">Close All Positions</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
