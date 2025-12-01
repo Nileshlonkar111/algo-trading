@@ -1,5 +1,6 @@
 // API Configuration
 // Auto-detect environment and set appropriate API base URL
+//this is the latest change
 function getApiBaseUrl() {
     const hostname = window.location.hostname;
     const protocol = window.location.protocol;
