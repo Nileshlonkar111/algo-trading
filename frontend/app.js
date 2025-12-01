@@ -1,8 +1,25 @@
 // API Configuration
-// Use /api prefix for all API calls (Nginx will proxy to backend)
-const API_BASE_URL = window.location.origin.includes('localhost')
-    ? 'http://localhost:8000'
-    : '/api';
+// Auto-detect environment and set appropriate API base URL
+function getApiBaseUrl() {
+    const hostname = window.location.hostname;
+    const protocol = window.location.protocol;
+    const port = window.location.port;
+    
+    console.log('Detected - hostname:', hostname, 'protocol:', protocol, 'port:', port);
+    
+    // Local development
+    if (hostname === 'localhost' || hostname === '127.0.0.1') {
+        return 'http://localhost:8000';
+    }
+    
+    // Production: construct full URL with /api prefix
+    const baseUrl = `${protocol}//${hostname}${port ? ':' + port : ''}/api`;
+    return baseUrl;
+}
+
+const API_BASE_URL = getApiBaseUrl();
+console.log('API_BASE_URL set to:', API_BASE_URL);
+
 let authToken = localStorage.getItem('authToken');
 let refreshInterval = null;
 
