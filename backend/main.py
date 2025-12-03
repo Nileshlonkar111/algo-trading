@@ -9,8 +9,21 @@ import os
 from dotenv import load_dotenv
 from typing import List, Optional
 import asyncio
+import logging
+import sys
 
 load_dotenv()
+
+# Configure logging at application level
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger(__name__)
+logger.info("[STARTUP] Application logging configured")
 
 app = FastAPI(title="Algo Trading Platform", version="1.0.0")
 
@@ -183,6 +196,7 @@ def close_all_positions():
 # Trading loop background task
 async def trading_loop():
     global trading_active
+    logger.info("[TRADING_LOOP] Trading loop started")
     print("[INFO] Trading loop started")
     try:
         while trading_active:
@@ -191,10 +205,12 @@ async def trading_loop():
                 trading_engine.scan_and_maybe_enter_once()
                 await asyncio.sleep(60)  # Run every minute
             except Exception as e:
+                logger.error(f"[TRADING_LOOP] Error: {e}", exc_info=True)
                 print(f"[ERROR] Trading loop error: {e}")
                 notification_handler("error", {"error": str(e), "type": "trading_loop"})
                 await asyncio.sleep(60)
     finally:
+        logger.info("[TRADING_LOOP] Trading loop stopped")
         print("[INFO] Trading loop stopped")
 
 # Health check

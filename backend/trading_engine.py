@@ -46,9 +46,15 @@ class TradingEngine:
         self.timezone = pytz.timezone('Asia/Kolkata')
         self._shutdown_requested = False
         
-        # Configure logging if not already configured
-        if not logging.getLogger().handlers:
-            logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+        # Configure logging to ensure output to stdout
+        self.logger.setLevel(logging.DEBUG)
+        if not self.logger.handlers:
+            handler = logging.StreamHandler()
+            handler.setLevel(logging.DEBUG)
+            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            handler.setFormatter(formatter)
+            self.logger.addHandler(handler)
+        self.logger.propagate = True
         
         # Validate configuration on initialization
         self._validate_config()
