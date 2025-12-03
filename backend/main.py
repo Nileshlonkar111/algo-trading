@@ -163,13 +163,20 @@ def clear_notifications():
 @app.post("/trading/start", dependencies=[Depends(require_auth)])
 async def start_trading(background_tasks: BackgroundTasks):
     global trading_active
-    if not kite_service.is_authenticated():
-        raise HTTPException(status_code=401, detail="Kite not authenticated")
+    
+    # Validate Kite authentication before starting
+    try:
+        kite_service.ensure_authenticated()
+    except Exception as e:
+        logger.error(f"[TRADING] Cannot start - Kite auth failed: {e}")
+        raise HTTPException(status_code=401, detail=str(e))
+    
     if trading_active:
         raise HTTPException(status_code=400, detail="Trading already active")
     
     trading_active = True
     background_tasks.add_task(trading_loop)
+    logger.info("[TRADING] Trading started successfully")
     return {"status": "started"}
 
 @app.post("/trading/stop", dependencies=[Depends(require_auth)])
@@ -180,9 +187,12 @@ def stop_trading():
 
 @app.get("/trading/status", dependencies=[Depends(require_auth)])
 def trading_status():
+    # Get current auth status with validation
+    auth_status = kite_service.token_status()
     return {
         "active": trading_active,
-        "authenticated": kite_service.is_authenticated(),
+        "authenticated": auth_status.value == "authenticated",
+        "token_status": auth_status.value,
         "open_positions": sum(1 for p in trading_engine.positions.values() if p["status"] == "OPEN")
     }
 

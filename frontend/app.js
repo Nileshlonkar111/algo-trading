@@ -23,6 +23,8 @@ console.log('API_BASE_URL set to:', API_BASE_URL);
 
 let authToken = localStorage.getItem('authToken');
 let refreshInterval = null;
+let isCheckingKiteStatus = false;
+let isCheckingTradingStatus = false;
 
 // Utility Functions
 function showScreen(screenId) {
@@ -101,21 +103,37 @@ function logout() {
 
 // Initialize Dashboard
 async function initDashboard() {
-    await loadConfig();
-    await checkKiteStatus();
-    await checkTradingStatus();
-    startAutoRefresh();
+    // Show loading states
+    document.getElementById('kiteStatus').textContent = 'Checking...';
+    document.getElementById('tradingStatus').textContent = 'Checking...';
+    
+    // Load data with proper sequencing
+    try {
+        await loadConfig();
+        await checkKiteStatus();
+        await checkTradingStatus();
+        startAutoRefresh();
+    } catch (error) {
+        console.error('Dashboard initialization error:', error);
+        showError('loginError', 'Failed to initialize dashboard: ' + error.message);
+    }
 }
 
 function startAutoRefresh() {
     refreshInterval = setInterval(async () => {
-        await Promise.all([
-            updatePnL(),
-            updatePositions(),
-            updateTradeLogs(),
-            updateNotifications(),
-            checkTradingStatus()
-        ]);
+        try {
+            await Promise.all([
+                updatePnL(),
+                updatePositions(),
+                updateTradeLogs(),
+                updateNotifications(),
+                checkTradingStatus(),
+                checkKiteStatus() // Also refresh Kite status
+            ]);
+        } catch (error) {
+            console.error('Auto-refresh error:', error);
+            // Don't stop refresh on individual errors
+        }
     }, 5000); // Refresh every 5 seconds
 }
 
@@ -138,66 +156,120 @@ document.getElementById('openKiteLoginBtn').addEventListener('click', async () =
 });
 
 document.getElementById('submitTokenBtn').addEventListener('click', async () => {
-    const requestToken = document.getElementById('requestToken').value;
+    const requestToken = document.getElementById('requestToken').value.trim();
     if (!requestToken) {
         showError('authError', 'Please enter request token');
         return;
     }
 
+    const btn = document.getElementById('submitTokenBtn');
+    const originalText = btn.textContent;
+    
     try {
+        btn.disabled = true;
+        btn.textContent = 'Authenticating...';
+        
         await apiCall('/kite/generate_token', {
             method: 'POST',
             body: JSON.stringify({ request_token: requestToken })
         });
         
+        // Clear input field
+        document.getElementById('requestToken').value = '';
+        
+        // Close modal and refresh status
         document.getElementById('kiteAuthModal').classList.add('hidden');
         await checkKiteStatus();
         alert('Kite authentication successful!');
     } catch (error) {
-        showError('authError', error.message);
+        showError('authError', 'Authentication failed: ' + error.message);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = originalText;
     }
 });
 
 async function checkKiteStatus() {
+    if (isCheckingKiteStatus) return; // Prevent concurrent calls
+    
+    isCheckingKiteStatus = true;
+    const statusEl = document.getElementById('kiteStatus');
+    
     try {
         const data = await apiCall('/kite/token_status');
-        const statusEl = document.getElementById('kiteStatus');
         
         if (data.status === 'authenticated') {
             statusEl.textContent = 'Connected';
             statusEl.className = 'status-indicator connected';
+        } else if (data.status === 'expired') {
+            statusEl.textContent = 'Expired - Re-auth Required';
+            statusEl.className = 'status-indicator disconnected';
         } else {
             statusEl.textContent = 'Not Connected';
             statusEl.className = 'status-indicator disconnected';
         }
     } catch (error) {
         console.error('Failed to check Kite status:', error);
+        statusEl.textContent = 'Error Checking Status';
+        statusEl.className = 'status-indicator disconnected';
+    } finally {
+        isCheckingKiteStatus = false;
     }
 }
 
 // Trading Control
 document.getElementById('toggleTradingBtn').addEventListener('click', async () => {
-    const statusData = await apiCall('/trading/status');
+    const btn = document.getElementById('toggleTradingBtn');
+    const originalText = btn.textContent;
     
     try {
+        // Show loading state
+        btn.disabled = true;
+        btn.textContent = 'Processing...';
+        
+        const statusData = await apiCall('/trading/status');
+        
         if (statusData.active) {
             await apiCall('/trading/stop', { method: 'POST' });
-            alert('Trading stopped');
+            alert('Trading stopped successfully');
         } else {
+            // Check authentication status
             if (!statusData.authenticated) {
-                alert('Please authenticate with Kite first');
+                const tokenStatus = statusData.token_status || 'not_authenticated';
+                if (tokenStatus === 'expired') {
+                    alert('Kite authentication expired. Please re-authenticate.');
+                } else {
+                    alert('Please authenticate with Kite first');
+                }
+                document.getElementById('kiteAuthModal').classList.remove('hidden');
                 return;
             }
+            
             await apiCall('/trading/start', { method: 'POST' });
-            alert('Trading started');
+            alert('Trading started successfully');
         }
         await checkTradingStatus();
     } catch (error) {
-        alert('Error: ' + error.message);
+        console.error('Trading toggle error:', error);
+        
+        // Show user-friendly error messages
+        if (error.message.includes('expired') || error.message.includes('authentication')) {
+            alert('Authentication issue: ' + error.message + '\nPlease re-authenticate with Kite.');
+            document.getElementById('kiteAuthModal').classList.remove('hidden');
+        } else {
+            alert('Error: ' + error.message);
+        }
+    } finally {
+        btn.disabled = false;
+        btn.textContent = originalText;
     }
 });
 
 async function checkTradingStatus() {
+    if (isCheckingTradingStatus) return; // Prevent concurrent calls
+    
+    isCheckingTradingStatus = true;
+    
     try {
         const data = await apiCall('/trading/status');
         const statusEl = document.getElementById('tradingStatus');
@@ -218,6 +290,11 @@ async function checkTradingStatus() {
         document.getElementById('openPositions').textContent = data.open_positions || 0;
     } catch (error) {
         console.error('Failed to check trading status:', error);
+        const statusEl = document.getElementById('tradingStatus');
+        statusEl.textContent = 'Error';
+        statusEl.className = 'status-indicator disconnected';
+    } finally {
+        isCheckingTradingStatus = false;
     }
 }
 
