@@ -330,7 +330,25 @@ class TradingEngine:
         # Fetch spot data and indicators
         try:
             nifty_token = self.config.get("nifty_token", 256265)
+            self.logger.info(f"[SCAN_DATA] Fetching spot data for token {nifty_token}...")
             spot_df = self.logic.fetch_spot_5m(nifty_token, days=2)
+            
+            if spot_df is not None and not spot_df.empty:
+                self.logger.info(f"[SCAN_DATA] Fetched {len(spot_df)} candles, Date range: {spot_df['datetime'].min()} to {spot_df['datetime'].max()}")
+                self.logger.info(f"[SCAN_DATA] Latest candle: Time={spot_df['datetime'].iloc[-1]}, Close={spot_df['close'].iloc[-1]:.2f}")
+                
+                # Check data freshness - last candle should be within last 10 minutes
+                last_candle_time = spot_df['datetime'].iloc[-1]
+                if hasattr(last_candle_time, 'tz_localize'):
+                    last_candle_time = last_candle_time.tz_localize(None)
+                
+                now = dt.datetime.now()
+                data_age_minutes = (now - last_candle_time).total_seconds() / 60
+                self.logger.info(f"[SCAN_DATA] Data freshness: Last candle was {data_age_minutes:.1f} minutes ago")
+                
+                if data_age_minutes > 10:
+                    self.logger.warning(f"[SCAN_DATA] ⚠️ STALE DATA WARNING! Last candle is {data_age_minutes:.1f} minutes old")
+            
             atr_period = self.config.get("atr_period", 14)
             spot_df = self.logic.add_spot_indicators(spot_df, atr_period)
         except Exception as e:
@@ -349,7 +367,8 @@ class TradingEngine:
         last_spot = spot_df.iloc[-1]
         prev_spot = spot_df.iloc[-2]
         
-        self.logger.info(f"[SCAN] Spot data fetched - Last candle time: {last_spot.name if hasattr(last_spot, 'name') else 'N/A'}")
+        # Log last 3 candles for debugging
+        self.logger.info(f"[SCAN_DATA] Last 3 candles close prices: {spot_df['close'].iloc[-3]:.2f}, {spot_df['close'].iloc[-2]:.2f}, {spot_df['close'].iloc[-1]:.2f}")
         self.logger.info(f"[SCAN_EMA] Previous: EMA5={prev_spot['EMA5']:.2f}, EMA20={prev_spot['EMA20']:.2f}")
         self.logger.info(f"[SCAN_EMA] Current:  EMA5={last_spot['EMA5']:.2f}, EMA20={last_spot['EMA20']:.2f}")
 
