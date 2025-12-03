@@ -274,14 +274,16 @@ class TradingEngine:
         return elapsed_seconds >= cooldown_min * 60
 
     def scan_and_maybe_enter_once(self) -> None:
-        """Main scanning and entry logic from v1.1.py"""
-        self.logger.info(f"[SCAN_START] ========== Scan cycle started at {dt.datetime.now(self.timezone).strftime('%H:%M:%S')} ==========")
+        """Main scanning and entry logic - called only at 5-minute candle closes by main loop"""
+        now_dt = dt.datetime.now(self.timezone)
+        nowt = now_dt.time()
+        
+        self.logger.info(f"[SCAN_START] ========== Scan cycle at {now_dt.strftime('%H:%M:%S')} (5-min candle closed) ==========")
         
         if self._shutdown_requested:
             self.logger.info("[SCAN] Shutdown requested, skipping scan")
             return
         
-        nowt = dt.datetime.now(self.timezone).time()
         self.logger.info(f"[SCAN] Current time: {nowt.strftime('%H:%M:%S')}, Entry window: 09:30-15:20")
         
         if not self.within_entry_window(nowt):
@@ -337,7 +339,7 @@ class TradingEngine:
                 self.logger.info(f"[SCAN_DATA] Fetched {len(spot_df)} candles, Date range: {spot_df['datetime'].min()} to {spot_df['datetime'].max()}")
                 self.logger.info(f"[SCAN_DATA] Latest candle: Time={spot_df['datetime'].iloc[-1]}, Close={spot_df['close'].iloc[-1]:.2f}")
                 
-                # Check data freshness - last candle should be within last 10 minutes
+                # Check data freshness - last candle should be very recent (within 6 minutes max)
                 last_candle_time = spot_df['datetime'].iloc[-1]
                 if hasattr(last_candle_time, 'tz_localize'):
                     last_candle_time = last_candle_time.tz_localize(None)
@@ -346,8 +348,12 @@ class TradingEngine:
                 data_age_minutes = (now - last_candle_time).total_seconds() / 60
                 self.logger.info(f"[SCAN_DATA] Data freshness: Last candle was {data_age_minutes:.1f} minutes ago")
                 
-                if data_age_minutes > 10:
-                    self.logger.warning(f"[SCAN_DATA] ⚠️ STALE DATA WARNING! Last candle is {data_age_minutes:.1f} minutes old")
+                # Ensure we're analyzing a CLOSED candle (should be 0-6 minutes old)
+                if data_age_minutes > 6:
+                    self.logger.warning(f"[SCAN_DATA] ⚠️ STALE DATA WARNING! Last candle is {data_age_minutes:.1f} minutes old, skipping")
+                    return
+                
+                self.logger.info(f"[SCAN_DATA] ✅ Data is fresh, analyzing CLOSED 5-min candle")
             
             atr_period = self.config.get("atr_period", 14)
             spot_df = self.logic.add_spot_indicators(spot_df, atr_period)
@@ -526,12 +532,18 @@ class TradingEngine:
             return
         
         nowt = dt.datetime.now(self.timezone).time()
+        
+        # Quick return if no positions
         if not self.positions:
             return
 
         tokens = [f"NFO:{sym}" for sym in self.positions.keys() if self.positions[sym]["status"] == "OPEN"]
         if not tokens:
             return
+        
+        # Log monitoring activity (info level so it's visible)
+        open_count = len(tokens)
+        self.logger.info(f"[MONITOR] Checking {open_count} open position(s) at {nowt.strftime('%H:%M:%S')}")
 
         ltp_data = {}
         try:
@@ -542,7 +554,17 @@ class TradingEngine:
                 key = f"NFO:{sym}"
                 entry = ltp_info.get(key)
                 if entry:
-                    ltp_data[sym] = list(entry.values())[0]["last_price"]
+                    # Handle both dict and direct value responses from kite.ltp()
+                    if isinstance(entry, dict):
+                        # If entry is a dict, extract last_price
+                        if "last_price" in entry:
+                            ltp_data[sym] = entry["last_price"]
+                        else:
+                            # Nested dict structure
+                            ltp_data[sym] = list(entry.values())[0]["last_price"]
+                    else:
+                        # Direct numeric value
+                        self.logger.warning(f"[MONITOR] Unexpected LTP response format for {sym}: {type(entry)}")
         except Exception as e:
             self.logger.error(f"[ERROR] LTP fetch failed: {e}", exc_info=True)
             if self.notify:
@@ -620,9 +642,15 @@ class TradingEngine:
             hit_sl = (ltp <= pos["sl_price"] if is_call else ltp >= pos["sl_price"])
             hit_tgt = (ltp >= pos["target_price"] if is_call else ltp <= pos["target_price"])
             time_exit = nowt >= eod_squareoff
+            
+            # Log current position status every check
+            pnl_current = (ltp - entry_price) * pos["quantity"]
+            pnl_pct_current = ((ltp - entry_price) / entry_price * 100) if entry_price > 0 else 0
+            self.logger.info(f"[MONITOR] {symbol}: LTP={ltp:.2f}, Entry={entry_price:.2f}, SL={pos['sl_price']:.2f}, TGT={pos['target_price']:.2f}, PnL={pnl_current:.2f} ({pnl_pct_current:+.2f}%)")
 
             if hit_sl or hit_tgt or time_exit:
                 reason = "SL" if hit_sl else ("TGT" if hit_tgt else "EOD")
+                self.logger.warning(f"[MONITOR] 🚨 EXIT TRIGGER: {symbol} - Reason: {reason}, LTP: {ltp:.2f}")
                 try:
                     self.kite.place_order(
                         variety=self.kite.VARIETY_REGULAR,
