@@ -275,18 +275,24 @@ class TradingEngine:
 
     def scan_and_maybe_enter_once(self) -> None:
         """Main scanning and entry logic from v1.1.py"""
+        self.logger.info(f"[SCAN_START] ========== Scan cycle started at {dt.datetime.now(self.timezone).strftime('%H:%M:%S')} ==========")
+        
         if self._shutdown_requested:
             self.logger.info("[SCAN] Shutdown requested, skipping scan")
             return
         
         nowt = dt.datetime.now(self.timezone).time()
+        self.logger.info(f"[SCAN] Current time: {nowt.strftime('%H:%M:%S')}, Entry window: 09:30-15:20")
+        
         if not self.within_entry_window(nowt):
+            self.logger.info(f"[SCAN] Outside entry window, skipping scan")
             return
 
         # Daily guards
         plr = self.daily_pl_ratio()
         daily_max_loss = self.config.get("daily_max_loss", -0.02)
         daily_max_profit = self.config.get("daily_max_profit", 0.04)
+        self.logger.info(f"[SCAN] Daily PnL ratio: {plr:.4f} (Loss limit: {daily_max_loss}, Profit cap: {daily_max_profit})")
         
         if plr <= daily_max_loss:
             self.logger.warning(f"[RISK_GUARD] Daily loss limit reached: {plr:.4f} <= {daily_max_loss}")
@@ -308,14 +314,18 @@ class TradingEngine:
         
         max_concurrent = self.config.get("max_concurrent_pos", 3)
         open_positions = sum(1 for p in self.positions.values() if p["status"] == "OPEN")
+        self.logger.info(f"[SCAN] Open positions: {open_positions}/{max_concurrent}")
         
         if open_positions >= max_concurrent:
             self.logger.info(f"[SCAN] Max concurrent positions reached ({open_positions}/{max_concurrent})")
             return
         
         if not self.global_cooldown_ok():
-            self.logger.info("[SCAN] Global cooldown active, skipping scan")
+            elapsed = (dt.datetime.now(self.timezone) - self.last_global_entry_time).total_seconds() / 60 if self.last_global_entry_time else 0
+            self.logger.info(f"[SCAN] Global cooldown active (elapsed: {elapsed:.1f} min, required: {self.config.get('min_minutes_between_entries', 10)} min)")
             return
+        
+        self.logger.info("[SCAN] All pre-checks passed, fetching market data...")
 
         # Fetch spot data and indicators
         try:
@@ -338,24 +348,35 @@ class TradingEngine:
 
         last_spot = spot_df.iloc[-1]
         prev_spot = spot_df.iloc[-2]
+        
+        self.logger.info(f"[SCAN] Spot data fetched - Last candle time: {last_spot.name if hasattr(last_spot, 'name') else 'N/A'}")
+        self.logger.info(f"[SCAN_EMA] Previous: EMA5={prev_spot['EMA5']:.2f}, EMA20={prev_spot['EMA20']:.2f}")
+        self.logger.info(f"[SCAN_EMA] Current:  EMA5={last_spot['EMA5']:.2f}, EMA20={last_spot['EMA20']:.2f}")
 
         # EMA crossover signal
         signal_side = None
         if prev_spot["EMA5"] <= prev_spot["EMA20"] and last_spot["EMA5"] > last_spot["EMA20"]:
             signal_side = "CE"
+            self.logger.info(f"[SCAN_SIGNAL] 🔵 BULLISH EMA CROSSOVER DETECTED! EMA5 crossed above EMA20 - Signal: {signal_side}")
         elif prev_spot["EMA5"] >= prev_spot["EMA20"] and last_spot["EMA5"] < last_spot["EMA20"]:
             signal_side = "PE"
+            self.logger.info(f"[SCAN_SIGNAL] 🔴 BEARISH EMA CROSSOVER DETECTED! EMA5 crossed below EMA20 - Signal: {signal_side}")
+        else:
+            self.logger.info(f"[SCAN_EMA] No crossover - EMA5 {'above' if last_spot['EMA5'] > last_spot['EMA20'] else 'below'} EMA20 (diff: {abs(last_spot['EMA5'] - last_spot['EMA20']):.2f})")
 
         if not signal_side:
-            self.logger.debug("[SCAN] No EMA crossover signal this candle")
+            self.logger.info("[SCAN] No EMA crossover signal this candle")
             return
 
         # ATR filter
         atr_median = spot_df["ATR"].rolling(20).median().iloc[-1]
+        self.logger.info(f"[SCAN_ATR] Current ATR: {last_spot['ATR']:.2f}, 20-period Median: {atr_median:.2f}")
         
         if pd.isna(atr_median) or last_spot["ATR"] < atr_median:
-            self.logger.info(f"[SCAN] Market too quiet - ATR: {last_spot['ATR']:.2f}, Median: {atr_median:.2f}")
+            self.logger.info(f"[SCAN_ATR] ❌ Market too quiet - ATR below median, skipping entry")
             return
+        
+        self.logger.info(f"[SCAN_ATR] ✅ ATR filter passed - Market volatile enough")
 
         # Get spot LTP and identify ATM option
         try:
@@ -373,10 +394,14 @@ class TradingEngine:
         atm = self.logic.round_to_50(spot_ltp)
         expiry = self.logic.get_next_expiry()
         underlying = self.config.get("underlying_name", "NIFTY")
+        self.logger.info(f"[SCAN_OPTION] Spot LTP: {spot_ltp:.2f}, ATM Strike: {atm}, Expiry: {expiry}, Side: {signal_side}")
+        
         tsym, token = self.logic.lookup_option(underlying, expiry, atm, signal_side)
         if not tsym or not token:
-            self.logger.warning(f"[SCAN] ATM option not found: {underlying} {expiry} {atm} {signal_side}")
+            self.logger.warning(f"[SCAN_OPTION] ❌ ATM option not found: {underlying} {expiry} {atm} {signal_side}")
             return
+        
+        self.logger.info(f"[SCAN_OPTION] ✅ Option identified: {tsym}")
 
         # VWAP filter on NIFTY FUT
         try:
@@ -395,11 +420,14 @@ class TradingEngine:
             vwap_direction_ok = (signal_side == "CE" and fut_last["close"] > fut_last["VWAP"]) or \
                                 (signal_side == "PE" and fut_last["close"] < fut_last["VWAP"])
             
-            self.logger.debug(f"[SCAN] FUT VWAP check - Close: {fut_last['close']:.2f}, VWAP: {fut_last['VWAP']:.2f}, OK: {vwap_direction_ok}")
+            self.logger.info(f"[SCAN_VWAP] FUT Close: {fut_last['close']:.2f}, VWAP: {fut_last['VWAP']:.2f}, Diff: {(fut_last['close'] - fut_last['VWAP']):.2f}")
+            self.logger.info(f"[SCAN_VWAP] Direction check: Signal={signal_side}, Close {'>' if fut_last['close'] > fut_last['VWAP'] else '<'} VWAP, Result: {'✅ PASS' if vwap_direction_ok else '❌ FAIL'}")
 
             if not vwap_direction_ok:
-                self.logger.info("[SCAN] FUT VWAP filter failed (direction mismatch)")
+                self.logger.info(f"[SCAN_VWAP] ❌ VWAP filter failed - FUT price on wrong side of VWAP for {signal_side} signal")
                 return
+            
+            self.logger.info(f"[SCAN_VWAP] ✅ VWAP filter passed")
         except Exception as e:
             self.logger.error(f"[ERROR] FUT VWAP calc failed: {e}", exc_info=True)
             if self.notify:
@@ -411,12 +439,15 @@ class TradingEngine:
 
         # Check duplicates / cooldown
         if tsym in self.entered_symbols_today and (tsym in self.positions and self.positions[tsym]["status"] == "OPEN"):
-            self.logger.info(f"[SCAN] Already in position: {tsym}")
+            self.logger.info(f"[SCAN_COOLDOWN] ❌ Already in position: {tsym}")
             return
         
         if not self.symbol_cooldown_ok(tsym):
-            self.logger.info(f"[SCAN] Symbol cooldown active for {tsym}")
+            elapsed = (dt.datetime.now(self.timezone) - self.symbol_last_exit_time.get(tsym)).total_seconds() / 60 if tsym in self.symbol_last_exit_time else 0
+            self.logger.info(f"[SCAN_COOLDOWN] ❌ Symbol cooldown active for {tsym} (elapsed: {elapsed:.1f} min, required: {self.config.get('per_symbol_cooldown_min', 20)} min)")
             return
+        
+        self.logger.info(f"[SCAN_COOLDOWN] ✅ No position conflicts or cooldowns")
 
         # Get entry LTP
         try:
@@ -431,12 +462,16 @@ class TradingEngine:
                     self.logger.error(f"[NOTIFY] Failed to send error notification: {notify_error}")
             return
 
+        self.logger.info(f"[SCAN_ENTRY] 🎯 ALL FILTERS PASSED! Preparing to enter {tsym} at {entry_ltp:.2f}")
         self.log_trade(tsym, "BUY", entry_ltp, status="PLANNED", note="signal (spot EMA + FUT VWAP)")
         atr_value = spot_df["ATR"].iloc[-1]
         lot_qty = self.config.get("lot_qty", 75)
+        
+        self.logger.info(f"[SCAN_ENTRY] Order details - Symbol: {tsym}, Price: {entry_ltp:.2f}, Qty: {lot_qty}, ATR: {atr_value:.2f}")
 
         # Place real market order
         try:
+            self.logger.info(f"[ORDER] Placing BUY order for {tsym}...")
             order_id = self.kite.place_order(
                 variety=self.kite.VARIETY_REGULAR,
                 exchange=self.kite.EXCHANGE_NFO,
