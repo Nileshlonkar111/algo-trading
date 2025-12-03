@@ -11,6 +11,7 @@ from typing import List, Optional
 import asyncio
 import logging
 import sys
+import datetime as dt
 
 load_dotenv()
 
@@ -198,8 +199,6 @@ async def trading_loop():
     global trading_active
     logger.info("[TRADING_LOOP] Trading loop started")
     print("[INFO] Trading loop started")
-    
-    import datetime as dt
     
     # Track last scan time to avoid duplicate scans in same 5-min window
     last_scan_minute = -1
