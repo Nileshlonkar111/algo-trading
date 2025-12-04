@@ -83,8 +83,11 @@ class WebSocketClient {
                 if (host === 'localhost' || host === '127.0.0.1') {
                     wsUrl = `ws://localhost:8000/ws`;
                 } else {
-                    // Production
-                    wsUrl = `${protocol}//${host}${port ? ':' + port : ''}/api/ws`;
+                    // Production: Use relative path which will work with nginx proxy
+                    // The browser will automatically use the correct protocol and host
+                    const baseUrl = `${protocol}//${host}${port ? ':' + port : ''}`;
+                    wsUrl = `${baseUrl}/api/ws`;
+                    console.log('[WS_CLIENT] Production WebSocket URL:', wsUrl);
                 }
             }
             
