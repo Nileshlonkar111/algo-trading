@@ -16,7 +16,7 @@ import datetime as dt
 import uuid
 
 # Ensure NO websocket_status import
-# load_dotenv()
+load_dotenv()
 
 # Configure logging at application level
 logging.basicConfig(
