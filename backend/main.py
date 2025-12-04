@@ -13,7 +13,8 @@ import logging
 import sys
 import datetime as dt
 
-load_dotenv()
+# Ensure NO websocket_status import
+# load_dotenv()
 
 # Configure logging at application level
 logging.basicConfig(
