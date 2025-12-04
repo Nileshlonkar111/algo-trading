@@ -20,98 +20,17 @@ function getApiBaseUrl() {
 
 const API_BASE_URL = getApiBaseUrl();
 console.log('API_BASE_URL set to:', API_BASE_URL);
-// --- WebSocket for status updates ---
-let statusSocket = null;
-let wsReconnectAttempts = 0;
-const MAX_RECONNECT_ATTEMPTS = 10;
-const RECONNECT_DELAY = 3000;
+// --- API polling for status updates ---
+let refreshInterval = null;
 
-function connectStatusWebSocket() {
-    // Check if already authenticated
-    if (!authToken) {
-        console.log('[WEBSOCKET] Not authenticated, skipping WebSocket connection');
-        return;
-    }
-
-    const wsProtocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
-    const wsHost = window.location.hostname;
-    const wsPort = window.location.port ? ':' + window.location.port : '';
-    
-    // For production with /api prefix
-    let wsPath = '/ws/status';
-    if (window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
-        wsPath = '/api/ws/status';
-    }
-    
-    const wsUrl = `${wsProtocol}://${wsHost}${wsPort}${wsPath}`;
-    
-    console.log('[WEBSOCKET] Connecting to:', wsUrl);
-    
-    try {
-        statusSocket = new WebSocket(wsUrl);
-
-        statusSocket.onopen = () => {
-            console.log('[WEBSOCKET] Connected successfully');
-            wsReconnectAttempts = 0; // Reset reconnect counter on success
-        };
-        
-        statusSocket.onmessage = (event) => {
-            try {
-                const data = JSON.parse(event.data);
-                console.log('[WEBSOCKET] Received data:', data);
-                
-                // Update UI with received data
-                if (data.trading) {
-                    updateTradingStatusFromData(data.trading);
-                }
-                if (data.pnl) {
-                    updatePnLFromData(data.pnl);
-                }
-                if (data.positions) {
-                    updatePositionsFromData(data.positions);
-                }
-                if (data.logs) {
-                    updateTradeLogsFromData(data.logs);
-                }
-                if (data.notifications) {
-                    updateNotificationsFromData(data.notifications);
-                }
-            } catch (e) {
-                console.error('[WEBSOCKET] Error parsing message:', e, event.data);
-            }
-        };
-        
-        statusSocket.onclose = (event) => {
-            console.warn('[WEBSOCKET] Connection closed:', event.code, event.reason);
-            statusSocket = null;
-            
-            // Implement exponential backoff for reconnection
-            if (wsReconnectAttempts < MAX_RECONNECT_ATTEMPTS && authToken) {
-                wsReconnectAttempts++;
-                const delay = RECONNECT_DELAY * wsReconnectAttempts;
-                console.log(`[WEBSOCKET] Reconnecting in ${delay/1000}s (attempt ${wsReconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`);
-                setTimeout(connectStatusWebSocket, delay);
-            } else if (wsReconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-                console.error('[WEBSOCKET] Max reconnection attempts reached');
-            }
-        };
-        
-        statusSocket.onerror = (err) => {
-            console.error('[WEBSOCKET] Error:', err);
-        };
-    } catch (error) {
-        console.error('[WEBSOCKET] Failed to create WebSocket:', error);
-    }
-}
-
-// Disconnect WebSocket when logging out
-function disconnectWebSocket() {
-    if (statusSocket) {
-        console.log('[WEBSOCKET] Disconnecting...');
-        statusSocket.close();
-        statusSocket = null;
-        wsReconnectAttempts = 0;
-    }
+function startAutoRefresh() {
+    refreshInterval = setInterval(async () => {
+        try {
+            await updateDashboard();
+        } catch (error) {
+            console.error('Auto-refresh error:', error);
+        }
+    }, 5000); // Refresh every 5 seconds
 }
 
 let authToken = localStorage.getItem('authToken');
@@ -178,10 +97,6 @@ document.getElementById('loginForm').addEventListener('submit', async (e) => {
         
         document.getElementById('username-display').textContent = username;
         showScreen('dashboardScreen');
-        
-        // Connect WebSocket after authentication
-        connectStatusWebSocket();
-        
         initDashboard();
     } catch (error) {
         showError('loginError', error.message);
@@ -191,7 +106,6 @@ document.getElementById('loginForm').addEventListener('submit', async (e) => {
 document.getElementById('logoutBtn').addEventListener('click', logout);
 
 function logout() {
-    disconnectWebSocket();
     authToken = null;
     localStorage.removeItem('authToken');
     localStorage.removeItem('username');
@@ -204,45 +118,14 @@ async function initDashboard() {
     // Show loading states
     document.getElementById('kiteStatus').textContent = 'Checking...';
     document.getElementById('tradingStatus').textContent = 'Checking...';
-    
-    // Load data with proper sequencing
+
     try {
         await loadConfig();
-        // Initial load - WebSocket will handle updates after this
-        await loadInitialDashboardData();
-        console.log('[DASHBOARD] Initialized - WebSocket handling real-time updates');
+        await updateDashboard(); // Single call to load all dashboard data
+        startAutoRefresh();
     } catch (error) {
         console.error('Dashboard initialization error:', error);
         showError('loginError', 'Failed to initialize dashboard: ' + error.message);
-    }
-}
-
-// Load initial dashboard data on login
-async function loadInitialDashboardData() {
-    try {
-        const data = await apiCall('/dashboard/status');
-        
-        // Update all UI components from initial load
-        if (data.trading) {
-            updateTradingStatusFromData(data.trading);
-        }
-        if (data.pnl) {
-            updatePnLFromData(data.pnl);
-        }
-        if (data.positions) {
-            updatePositionsFromData(data.positions);
-        }
-        if (data.logs) {
-            updateTradeLogsFromData(data.logs);
-        }
-        if (data.notifications) {
-            updateNotificationsFromData(data.notifications);
-        }
-        
-        console.log('[DASHBOARD] Initial data loaded successfully');
-    } catch (error) {
-        console.error('[DASHBOARD] Failed to load initial data:', error);
-        throw error;
     }
 }
 
@@ -730,10 +613,6 @@ if (authToken) {
     const username = localStorage.getItem('username');
     document.getElementById('username-display').textContent = username;
     showScreen('dashboardScreen');
-    
-    // Connect WebSocket if already authenticated
-    connectStatusWebSocket();
-    
     initDashboard();
 } else {
     showScreen('loginScreen');
