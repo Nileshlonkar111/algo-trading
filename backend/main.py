@@ -194,6 +194,27 @@ async def start_trading(background_tasks: BackgroundTasks):
     if trading_active:
         raise HTTPException(status_code=400, detail="Trading already active")
     
+
+@app.get("/dashboard/status", dependencies=[Depends(require_auth)])
+def get_dashboard_status():
+    """Aggregated endpoint that returns all dashboard data in a single call"""
+    auth_status = kite_service.token_status()
+    
+    return {
+        "trading": {
+            "active": trading_active,
+            "authenticated": auth_status.value == "authenticated",
+            "token_status": auth_status.value,
+            "open_positions": sum(1 for p in trading_engine.positions.values() if p["status"] == "OPEN")
+        },
+        "pnl": {
+            "realized_pnl": trading_engine.get_pnl(),
+            "daily_pl_ratio": trading_engine.daily_pl_ratio()
+        },
+        "positions": trading_engine.get_positions(),
+        "logs": trading_engine.get_trade_logs()[-20:] if len(trading_engine.get_trade_logs()) > 0 else [],
+        "notifications": notifications[-20:] if len(notifications) > 0 else []
+    }
     trading_active = True
     save_trading_active(trading_active)
     background_tasks.add_task(trading_loop)

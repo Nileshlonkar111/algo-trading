@@ -110,8 +110,7 @@ async function initDashboard() {
     // Load data with proper sequencing
     try {
         await loadConfig();
-        await checkKiteStatus();
-        await checkTradingStatus();
+        await updateDashboard(); // Single call to load all dashboard data
         startAutoRefresh();
     } catch (error) {
         console.error('Dashboard initialization error:', error);
@@ -122,19 +121,152 @@ async function initDashboard() {
 function startAutoRefresh() {
     refreshInterval = setInterval(async () => {
         try {
-            await Promise.all([
-                updatePnL(),
-                updatePositions(),
-                updateTradeLogs(),
-                updateNotifications(),
-                checkTradingStatus(),
-                checkKiteStatus() // Also refresh Kite status
-            ]);
+            // Single aggregated API call instead of 6 separate calls
+            await updateDashboard();
         } catch (error) {
             console.error('Auto-refresh error:', error);
             // Don't stop refresh on individual errors
         }
     }, 5000); // Refresh every 5 seconds
+}
+
+async function updateDashboard() {
+    try {
+        const data = await apiCall('/dashboard/status');
+        
+        // Update all UI components from single response
+        updateTradingStatusFromData(data.trading);
+        updatePnLFromData(data.pnl);
+        updatePositionsFromData(data.positions);
+        updateTradeLogsFromData(data.logs);
+        updateNotificationsFromData(data.notifications);
+    } catch (error) {
+        console.error('Failed to update dashboard:', error);
+    }
+}
+
+function updateTradingStatusFromData(trading) {
+    const statusEl = document.getElementById('tradingStatus');
+    const btnEl = document.getElementById('toggleTradingBtn');
+    
+    if (trading.active) {
+        statusEl.textContent = 'Active';
+        statusEl.className = 'status-indicator active';
+        btnEl.textContent = 'Stop Trading';
+        btnEl.className = 'btn-danger';
+    } else {
+        statusEl.textContent = 'Stopped';
+        statusEl.className = 'status-indicator disconnected';
+        btnEl.textContent = 'Start Trading';
+        btnEl.className = 'btn-primary';
+    }
+    
+    document.getElementById('openPositions').textContent = trading.open_positions || 0;
+    
+    // Update Kite status as well
+    const kiteStatusEl = document.getElementById('kiteStatus');
+    if (trading.token_status === 'authenticated') {
+        kiteStatusEl.textContent = 'Connected';
+        kiteStatusEl.className = 'status-indicator connected';
+    } else if (trading.token_status === 'expired') {
+        kiteStatusEl.textContent = 'Expired - Re-auth Required';
+        kiteStatusEl.className = 'status-indicator disconnected';
+    } else {
+        kiteStatusEl.textContent = 'Not Connected';
+        kiteStatusEl.className = 'status-indicator disconnected';
+    }
+}
+
+function updatePnLFromData(pnl) {
+    const pnlEl = document.getElementById('pnlDisplay');
+    const pctEl = document.getElementById('pnlPercent');
+    
+    const pnlValue = pnl.realized_pnl || 0;
+    const pnlPct = (pnl.daily_pl_ratio || 0) * 100;
+    
+    pnlEl.textContent = `₹${pnlValue.toFixed(2)}`;
+    pnlEl.className = 'pnl-value ' + (pnlValue >= 0 ? 'positive' : 'negative');
+    pctEl.textContent = `${pnlPct.toFixed(2)}%`;
+}
+
+function updatePositionsFromData(positionsData) {
+    const container = document.getElementById('positionsTable');
+    const positions = Object.entries(positionsData || {}).filter(([_, pos]) => pos.status === 'OPEN');
+    
+    if (positions.length === 0) {
+        container.innerHTML = '<p class="no-data">No open positions</p>';
+        return;
+    }
+    
+    let html = '<table><thead><tr><th>Symbol</th><th>Entry Price</th><th>Current LTP</th><th>Qty</th><th>SL</th><th>Target</th><th>Status</th></tr></thead><tbody>';
+    
+    for (const [symbol, pos] of positions) {
+        html += `<tr>
+            <td>${symbol}</td>
+            <td>₹${pos.entry_price?.toFixed(2) || 0}</td>
+            <td>-</td>
+            <td>${pos.quantity || 0}</td>
+            <td>₹${pos.sl_price?.toFixed(2) || 0}</td>
+            <td>₹${pos.target_price?.toFixed(2) || 0}</td>
+            <td><span class="status-indicator active">${pos.status}</span></td>
+        </tr>`;
+    }
+    
+    html += '</tbody></table>';
+    container.innerHTML = html;
+}
+
+function updateTradeLogsFromData(logs) {
+    const container = document.getElementById('tradeLogsTable');
+    
+    if (logs.length === 0) {
+        container.innerHTML = '<p class="no-data">No trades yet</p>';
+        return;
+    }
+    
+    let html = '<table><thead><tr><th>Time</th><th>Symbol</th><th>Action</th><th>Price</th><th>P&L</th><th>Status</th><th>Note</th></tr></thead><tbody>';
+    
+    const recentLogs = logs.slice(-20).reverse();
+    
+    for (const log of recentLogs) {
+        const pnlClass = log.pnl > 0 ? 'positive' : (log.pnl < 0 ? 'negative' : '');
+        html += `<tr>
+            <td>${log.time}</td>
+            <td>${log.symbol}</td>
+            <td>${log.action}</td>
+            <td>₹${log.entry_price?.toFixed(2) || 0}</td>
+            <td class="${pnlClass}">${log.pnl ? '₹' + log.pnl.toFixed(2) : '-'}</td>
+            <td>${log.status}</td>
+            <td>${log.note || '-'}</td>
+        </tr>`;
+    }
+    
+    html += '</tbody></table>';
+    container.innerHTML = html;
+}
+
+function updateNotificationsFromData(notificationsData) {
+    const container = document.getElementById('notificationsList');
+    
+    if (notificationsData.length === 0) {
+        container.innerHTML = '<p class="no-data">No notifications</p>';
+        return;
+    }
+    
+    let html = '';
+    const recentNotifications = notificationsData.slice(-20).reverse();
+    
+    for (const notif of recentNotifications) {
+        const typeClass = notif.type === 'error' ? 'error' :
+                        notif.type === 'order_executed' ? 'success' : '';
+        
+        html += `<div class="notification-item ${typeClass}">
+            <div class="timestamp">${notif.timestamp || new Date().toLocaleString()}</div>
+            <div class="message"><strong>${notif.type}</strong>: ${JSON.stringify(notif.data)}</div>
+        </div>`;
+    }
+    
+    container.innerHTML = html;
 }
 
 // Kite Authentication
