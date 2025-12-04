@@ -265,16 +265,22 @@ document.getElementById('toggleTradingBtn').addEventListener('click', async () =
     }
 });
 
+let latestTradingStatusTimestamp = 0;
 async function checkTradingStatus() {
     if (isCheckingTradingStatus) return; // Prevent concurrent calls
     
     isCheckingTradingStatus = true;
-    
+    const requestTimestamp = Date.now();
+
     try {
         const data = await apiCall('/trading/status');
+        // Only update UI if this is the latest request
+        if (requestTimestamp < latestTradingStatusTimestamp) return;
+        latestTradingStatusTimestamp = requestTimestamp;
+
         const statusEl = document.getElementById('tradingStatus');
         const btnEl = document.getElementById('toggleTradingBtn');
-        
+
         if (data.active) {
             statusEl.textContent = 'Active';
             statusEl.className = 'status-indicator active';
@@ -286,9 +292,11 @@ async function checkTradingStatus() {
             btnEl.textContent = 'Start Trading';
             btnEl.className = 'btn-primary';
         }
-        
+
         document.getElementById('openPositions').textContent = data.open_positions || 0;
     } catch (error) {
+        if (requestTimestamp < latestTradingStatusTimestamp) return;
+        latestTradingStatusTimestamp = requestTimestamp;
         console.error('Failed to check trading status:', error);
         const statusEl = document.getElementById('tradingStatus');
         statusEl.textContent = 'Error';
