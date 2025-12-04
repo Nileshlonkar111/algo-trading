@@ -105,27 +105,119 @@ class TradingLogic:
     
     @retry_on_exception(retries=3, delay=2)
     def fetch_spot_5m(self, nifty_token, days=2):
+        """Fetch 5-minute historical data with live candle injection during market hours"""
         to_dt = dt.datetime.now()
         from_dt = to_dt - timedelta(days=days)
+        
+        # Fetch completed historical candles
         data = self.kite.historical_data(nifty_token, from_dt, to_dt, "5minute")
         df = pd.DataFrame(data)
+        
         if "date" in df.columns:
             df.rename(columns={"date": "datetime"}, inplace=True)
         if "datetime" in df.columns:
             df["datetime"] = pd.to_datetime(df["datetime"])
+        
+        # During market hours (9:15-15:30), inject current live candle
+        now = dt.datetime.now()
+        market_start = now.replace(hour=9, minute=15, second=0, microsecond=0)
+        market_end = now.replace(hour=15, minute=30, second=0, microsecond=0)
+        
+        if market_start <= now <= market_end:
+            try:
+                # Get live quote for current price
+                quote = self.kite.quote([nifty_token])
+                if quote and nifty_token in quote:
+                    ohlc = quote[nifty_token]['ohlc']
+                    
+                    # Calculate current 5-min candle start time
+                    minutes_since_market_open = (now - market_start).total_seconds() / 60
+                    candle_number = int(minutes_since_market_open // 5)
+                    current_candle_start = market_start + timedelta(minutes=candle_number * 5)
+                    
+                    # Create live candle row
+                    live_candle = {
+                        'datetime': current_candle_start,
+                        'open': ohlc['open'],
+                        'high': ohlc['high'],
+                        'low': ohlc['low'],
+                        'close': quote[nifty_token]['last_price'],
+                        'volume': quote[nifty_token].get('volume', 0)
+                    }
+                    
+                    # Check if this candle already exists in historical data
+                    if not df.empty and df['datetime'].iloc[-1] == current_candle_start:
+                        # Update existing candle with live data
+                        df.iloc[-1] = live_candle
+                        TradingLogic.logger.info(f"[LIVE_DATA] Updated incomplete candle at {current_candle_start} with live price {live_candle['close']:.2f}")
+                    else:
+                        # Append new live candle
+                        df = pd.concat([df, pd.DataFrame([live_candle])], ignore_index=True)
+                        TradingLogic.logger.info(f"[LIVE_DATA] Injected new live candle at {current_candle_start} with price {live_candle['close']:.2f}")
+                        
+            except Exception as e:
+                TradingLogic.logger.warning(f"[LIVE_DATA] Failed to inject live candle: {e}")
+                # Continue with historical data only
+        
         return df
     
     @retry_on_exception(retries=3, delay=2)
     def fetch_fut_5m(self, fut_token, days=2):
+        """Fetch 5-minute futures data with live candle injection during market hours"""
         try:
             to_dt = dt.datetime.now()
             from_dt = to_dt - timedelta(days=days)
+            
+            # Fetch completed historical candles
             data = self.kite.historical_data(fut_token, from_dt, to_dt, "5minute")
             df = pd.DataFrame(data)
+            
             if "date" in df.columns:
                 df.rename(columns={"date": "datetime"}, inplace=True)
             if "datetime" in df.columns:
                 df["datetime"] = pd.to_datetime(df["datetime"])
+            
+            # During market hours (9:15-15:30), inject current live candle
+            now = dt.datetime.now()
+            market_start = now.replace(hour=9, minute=15, second=0, microsecond=0)
+            market_end = now.replace(hour=15, minute=30, second=0, microsecond=0)
+            
+            if market_start <= now <= market_end:
+                try:
+                    # Get live quote for current price
+                    quote = self.kite.quote([fut_token])
+                    if quote and fut_token in quote:
+                        ohlc = quote[fut_token]['ohlc']
+                        
+                        # Calculate current 5-min candle start time
+                        minutes_since_market_open = (now - market_start).total_seconds() / 60
+                        candle_number = int(minutes_since_market_open // 5)
+                        current_candle_start = market_start + timedelta(minutes=candle_number * 5)
+                        
+                        # Create live candle row
+                        live_candle = {
+                            'datetime': current_candle_start,
+                            'open': ohlc['open'],
+                            'high': ohlc['high'],
+                            'low': ohlc['low'],
+                            'close': quote[fut_token]['last_price'],
+                            'volume': quote[fut_token].get('volume', 0)
+                        }
+                        
+                        # Check if this candle already exists in historical data
+                        if not df.empty and df['datetime'].iloc[-1] == current_candle_start:
+                            # Update existing candle with live data
+                            df.iloc[-1] = live_candle
+                            TradingLogic.logger.info(f"[LIVE_DATA_FUT] Updated incomplete candle at {current_candle_start} with live price {live_candle['close']:.2f}")
+                        else:
+                            # Append new live candle
+                            df = pd.concat([df, pd.DataFrame([live_candle])], ignore_index=True)
+                            TradingLogic.logger.info(f"[LIVE_DATA_FUT] Injected new live candle at {current_candle_start} with price {live_candle['close']:.2f}")
+                            
+                except Exception as e:
+                    TradingLogic.logger.warning(f"[LIVE_DATA_FUT] Failed to inject live candle: {e}")
+                    # Continue with historical data only
+            
             return df
         except Exception as e:
             TradingLogic.logger.error("[ERR] fetch_fut_5m: %s", e)
