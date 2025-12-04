@@ -20,18 +20,6 @@ function getApiBaseUrl() {
 
 const API_BASE_URL = getApiBaseUrl();
 console.log('API_BASE_URL set to:', API_BASE_URL);
-// --- API polling for status updates ---
-let refreshInterval = null;
-
-function startAutoRefresh() {
-    refreshInterval = setInterval(async () => {
-        try {
-            await updateDashboard();
-        } catch (error) {
-            console.error('Auto-refresh error:', error);
-        }
-    }, 5000); // Refresh every 5 seconds
-}
 
 let authToken = localStorage.getItem('authToken');
 let wsClient = null; // WebSocket client instance
@@ -567,46 +555,6 @@ document.getElementById('toggleTradingBtn').addEventListener('click', async () =
     }
 });
 
-let latestTradingStatusTimestamp = 0;
-async function checkTradingStatus() {
-    if (isCheckingTradingStatus) return; // Prevent concurrent calls
-    
-    isCheckingTradingStatus = true;
-    const requestTimestamp = Date.now();
-
-    try {
-        const data = await apiCall('/trading/status');
-        // Only update UI if this is the latest request
-        if (requestTimestamp < latestTradingStatusTimestamp) return;
-        latestTradingStatusTimestamp = requestTimestamp;
-
-        const statusEl = document.getElementById('tradingStatus');
-        const btnEl = document.getElementById('toggleTradingBtn');
-
-        if (data.active) {
-            statusEl.textContent = 'Active';
-            statusEl.className = 'status-indicator active';
-            btnEl.textContent = 'Stop Trading';
-            btnEl.className = 'btn-danger';
-        } else {
-            statusEl.textContent = 'Stopped';
-            statusEl.className = 'status-indicator disconnected';
-            btnEl.textContent = 'Start Trading';
-            btnEl.className = 'btn-primary';
-        }
-
-        document.getElementById('openPositions').textContent = data.open_positions || 0;
-    } catch (error) {
-        if (requestTimestamp < latestTradingStatusTimestamp) return;
-        latestTradingStatusTimestamp = requestTimestamp;
-        console.error('Failed to check trading status:', error);
-        const statusEl = document.getElementById('tradingStatus');
-        statusEl.textContent = 'Error';
-        statusEl.className = 'status-indicator disconnected';
-    } finally {
-        isCheckingTradingStatus = false;
-    }
-}
 
 // Configuration
 async function loadConfig() {
@@ -644,125 +592,7 @@ document.getElementById('updateConfigBtn').addEventListener('click', async () =>
     }
 });
 
-// P&L Display
-async function updatePnL() {
-    try {
-        const data = await apiCall('/trades/pnl');
-        const pnlEl = document.getElementById('pnlDisplay');
-        const pctEl = document.getElementById('pnlPercent');
-        
-        const pnl = data.realized_pnl || 0;
-        const pnlPct = (data.daily_pl_ratio || 0) * 100;
-        
-        pnlEl.textContent = `₹${pnl.toFixed(2)}`;
-        pnlEl.className = 'pnl-value ' + (pnl >= 0 ? 'positive' : 'negative');
-        
-        pctEl.textContent = `${pnlPct.toFixed(2)}%`;
-    } catch (error) {
-        console.error('Failed to update P&L:', error);
-    }
-}
-
-// Positions
-async function updatePositions() {
-    try {
-        const data = await apiCall('/trades/positions');
-        const container = document.getElementById('positionsTable');
-        const positions = Object.entries(data.positions || {}).filter(([_, pos]) => pos.status === 'OPEN');
-        
-        if (positions.length === 0) {
-            container.innerHTML = '<p class="no-data">No open positions</p>';
-            return;
-        }
-        
-        let html = '<table><thead><tr><th>Symbol</th><th>Entry Price</th><th>Current LTP</th><th>Qty</th><th>SL</th><th>Target</th><th>Status</th></tr></thead><tbody>';
-        
-        for (const [symbol, pos] of positions) {
-            html += `<tr>
-                <td>${symbol}</td>
-                <td>₹${pos.entry_price?.toFixed(2) || 0}</td>
-                <td>-</td>
-                <td>${pos.quantity || 0}</td>
-                <td>₹${pos.sl_price?.toFixed(2) || 0}</td>
-                <td>₹${pos.target_price?.toFixed(2) || 0}</td>
-                <td><span class="status-indicator active">${pos.status}</span></td>
-            </tr>`;
-        }
-        
-        html += '</tbody></table>';
-        container.innerHTML = html;
-    } catch (error) {
-        console.error('Failed to update positions:', error);
-    }
-}
-
-// Trade Logs
-async function updateTradeLogs() {
-    try {
-        const data = await apiCall('/trades/logs');
-        const container = document.getElementById('tradeLogsTable');
-        const logs = data.logs || [];
-        
-        if (logs.length === 0) {
-            container.innerHTML = '<p class="no-data">No trades yet</p>';
-            return;
-        }
-        
-        let html = '<table><thead><tr><th>Time</th><th>Symbol</th><th>Action</th><th>Price</th><th>P&L</th><th>Status</th><th>Note</th></tr></thead><tbody>';
-        
-        // Show last 20 trades
-        const recentLogs = logs.slice(-20).reverse();
-        
-        for (const log of recentLogs) {
-            const pnlClass = log.pnl > 0 ? 'positive' : (log.pnl < 0 ? 'negative' : '');
-            html += `<tr>
-                <td>${log.time}</td>
-                <td>${log.symbol}</td>
-                <td>${log.action}</td>
-                <td>₹${log.entry_price?.toFixed(2) || 0}</td>
-                <td class="${pnlClass}">${log.pnl ? '₹' + log.pnl.toFixed(2) : '-'}</td>
-                <td>${log.status}</td>
-                <td>${log.note || '-'}</td>
-            </tr>`;
-        }
-        
-        html += '</tbody></table>';
-        container.innerHTML = html;
-    } catch (error) {
-        console.error('Failed to update trade logs:', error);
-    }
-}
-
-// Notifications
-async function updateNotifications() {
-    try {
-        const data = await apiCall('/notifications?limit=50');
-        const container = document.getElementById('notificationsList');
-        const notifications = data.notifications || [];
-        
-        if (notifications.length === 0) {
-            container.innerHTML = '<p class="no-data">No notifications</p>';
-            return;
-        }
-        
-        let html = '';
-        const recentNotifications = notifications.slice(-20).reverse();
-        
-        for (const notif of recentNotifications) {
-            const typeClass = notif.type === 'error' ? 'error' : 
-                            notif.type === 'order_executed' ? 'success' : '';
-            
-            html += `<div class="notification-item ${typeClass}">
-                <div class="timestamp">${notif.timestamp || new Date().toLocaleString()}</div>
-                <div class="message"><strong>${notif.type}</strong>: ${JSON.stringify(notif.data)}</div>
-            </div>`;
-        }
-        
-        container.innerHTML = html;
-    } catch (error) {
-        console.error('Failed to update notifications:', error);
-    }
-}
+// Deprecated polling functions removed - now handled by WebSocket real-time updates
 
 document.getElementById('clearNotificationsBtn').addEventListener('click', async () => {
     try {
@@ -782,8 +612,7 @@ document.getElementById('closeAllBtn').addEventListener('click', async () => {
     try {
         await apiCall('/trading/close_all', { method: 'POST' });
         alert('All positions closed successfully');
-        await updatePositions();
-        await updatePnL();
+        // WebSocket will automatically update positions and P&L
     } catch (error) {
         alert('Failed to close positions: ' + error.message);
     }
