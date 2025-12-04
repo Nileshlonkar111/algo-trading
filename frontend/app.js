@@ -131,8 +131,14 @@ function startAutoRefresh() {
 }
 
 async function updateDashboard() {
+    const requestTimestamp = Date.now();
+    
     try {
         const data = await apiCall('/dashboard/status');
+        
+        // Only update UI if this is the latest request (prevent race conditions)
+        if (requestTimestamp < latestTradingStatusTimestamp) return;
+        latestTradingStatusTimestamp = requestTimestamp;
         
         // Update all UI components from single response
         updateTradingStatusFromData(data.trading);
@@ -141,6 +147,8 @@ async function updateDashboard() {
         updateTradeLogsFromData(data.logs);
         updateNotificationsFromData(data.notifications);
     } catch (error) {
+        if (requestTimestamp < latestTradingStatusTimestamp) return;
+        latestTradingStatusTimestamp = requestTimestamp;
         console.error('Failed to update dashboard:', error);
     }
 }
