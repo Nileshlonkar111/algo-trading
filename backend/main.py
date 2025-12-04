@@ -15,7 +15,8 @@ import sys
 import datetime as dt
 import uuid
 
-load_dotenv()
+# Ensure NO websocket_status import
+# load_dotenv()
 
 # Configure logging at application level
 logging.basicConfig(
@@ -436,6 +437,8 @@ async def trading_loop():
 @app.get("/health")
 def health_check():
     return {"status": "healthy", "version": "1.0.0"}
+
+# No WebSocket router; pure API polling logic restored
 
 if __name__ == "__main__":
     import uvicorn

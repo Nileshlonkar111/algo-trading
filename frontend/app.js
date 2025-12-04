@@ -20,6 +20,18 @@ function getApiBaseUrl() {
 
 const API_BASE_URL = getApiBaseUrl();
 console.log('API_BASE_URL set to:', API_BASE_URL);
+// --- API polling for status updates ---
+let refreshInterval = null;
+
+function startAutoRefresh() {
+    refreshInterval = setInterval(async () => {
+        try {
+            await updateDashboard();
+        } catch (error) {
+            console.error('Auto-refresh error:', error);
+        }
+    }, 5000); // Refresh every 5 seconds
+}
 
 let authToken = localStorage.getItem('authToken');
 let wsClient = null; // WebSocket client instance
@@ -115,8 +127,7 @@ async function initDashboard() {
     // Show loading states
     document.getElementById('kiteStatus').textContent = 'Checking...';
     document.getElementById('tradingStatus').textContent = 'Checking...';
-    
-    // Load data with proper sequencing
+
     try {
         await loadConfig();
         
@@ -301,32 +312,37 @@ function updateConnectionStatus(status) {
 function updateTradingStatusFromData(trading) {
     const statusEl = document.getElementById('tradingStatus');
     const btnEl = document.getElementById('toggleTradingBtn');
-    
-    if (trading.active) {
-        statusEl.textContent = 'Active';
-        statusEl.className = 'status-indicator active';
-        btnEl.textContent = 'Stop Trading';
-        btnEl.className = 'btn-danger';
-    } else {
-        statusEl.textContent = 'Stopped';
-        statusEl.className = 'status-indicator disconnected';
-        btnEl.textContent = 'Start Trading';
-        btnEl.className = 'btn-primary';
+
+    // Prevent flicker: Only update if changed
+    const currentStatusText = statusEl.textContent;
+    const newStatusText = trading.active ? 'Active' : 'Stopped';
+    if (currentStatusText !== newStatusText) {
+        statusEl.textContent = newStatusText;
+        statusEl.className = trading.active ? 'status-indicator active' : 'status-indicator disconnected';
+        btnEl.textContent = trading.active ? 'Stop Trading' : 'Start Trading';
+        btnEl.className = trading.active ? 'btn-danger' : 'btn-primary';
     }
-    
-    document.getElementById('openPositions').textContent = trading.open_positions || 0;
-    
-    // Update Kite status as well
+
+    // Only update open positions if changed
+    const openPositionsEl = document.getElementById('openPositions');
+    if (openPositionsEl.textContent !== String(trading.open_positions || 0)) {
+        openPositionsEl.textContent = trading.open_positions || 0;
+    }
+
+    // Update Kite status only if changed
     const kiteStatusEl = document.getElementById('kiteStatus');
+    let kiteText = 'Not Connected';
+    let kiteClass = 'status-indicator disconnected';
     if (trading.token_status === 'authenticated') {
-        kiteStatusEl.textContent = 'Connected';
-        kiteStatusEl.className = 'status-indicator connected';
+        kiteText = 'Connected';
+        kiteClass = 'status-indicator connected';
     } else if (trading.token_status === 'expired') {
-        kiteStatusEl.textContent = 'Expired - Re-auth Required';
-        kiteStatusEl.className = 'status-indicator disconnected';
-    } else {
-        kiteStatusEl.textContent = 'Not Connected';
-        kiteStatusEl.className = 'status-indicator disconnected';
+        kiteText = 'Expired - Re-auth Required';
+        kiteClass = 'status-indicator disconnected';
+    }
+    if (kiteStatusEl.textContent !== kiteText) {
+        kiteStatusEl.textContent = kiteText;
+        kiteStatusEl.className = kiteClass;
     }
 }
 
@@ -533,7 +549,6 @@ document.getElementById('toggleTradingBtn').addEventListener('click', async () =
             await apiCall('/trading/start', { method: 'POST' });
             alert('Trading started successfully');
         }
-        
         // WebSocket will automatically push the updated status
         // No need to manually refresh
     } catch (error) {
