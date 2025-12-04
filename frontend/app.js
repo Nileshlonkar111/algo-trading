@@ -20,6 +20,45 @@ function getApiBaseUrl() {
 
 const API_BASE_URL = getApiBaseUrl();
 console.log('API_BASE_URL set to:', API_BASE_URL);
+// --- WebSocket for status updates ---
+let statusSocket = null;
+function connectStatusWebSocket() {
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    const wsHost = window.location.hostname;
+    const wsPort = window.location.port ? ':' + window.location.port : '';
+    // Remove /api if present in base URL
+    const wsPath = '/ws/status';
+    const wsUrl = `${wsProtocol}://${wsHost}${wsPort}${wsPath}`;
+    statusSocket = new WebSocket(wsUrl);
+
+    statusSocket.onopen = () => {
+        console.log('WebSocket connected:', wsUrl);
+    };
+    statusSocket.onmessage = (event) => {
+        try {
+            const data = JSON.parse(event.data);
+            // You may need to adjust this depending on backend message format
+            if (data.type === 'status') {
+                updateTradingStatusFromData(data.trading);
+                updatePnLFromData(data.pnl);
+                updatePositionsFromData(data.positions);
+                updateTradeLogsFromData(data.logs);
+                updateNotificationsFromData(data.notifications);
+            }
+        } catch (e) {
+            console.warn('WebSocket message parse error:', e, event.data);
+        }
+    };
+    statusSocket.onclose = () => {
+        console.warn('WebSocket closed, retrying in 3s...');
+        setTimeout(connectStatusWebSocket, 3000);
+    };
+    statusSocket.onerror = (err) => {
+        console.error('WebSocket error:', err);
+        statusSocket.close();
+    };
+}
+connectStatusWebSocket();
 
 let authToken = localStorage.getItem('authToken');
 let refreshInterval = null;
