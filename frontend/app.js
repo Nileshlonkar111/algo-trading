@@ -388,7 +388,8 @@ document.getElementById('toggleTradingBtn').addEventListener('click', async () =
             await apiCall('/trading/start', { method: 'POST' });
             alert('Trading started successfully');
         }
-        await checkTradingStatus();
+        // Use aggregated endpoint instead of separate call
+        await updateDashboard();
     } catch (error) {
         console.error('Trading toggle error:', error);
         
