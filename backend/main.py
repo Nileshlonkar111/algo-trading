@@ -183,12 +183,18 @@ async def start_trading(background_tasks: BackgroundTasks):
 def stop_trading():
     global trading_active
     trading_active = False
+    logger.info("[TRADING] Trading stopped by user")
     return {"status": "stopped"}
 
 @app.get("/trading/status", dependencies=[Depends(require_auth)])
 def trading_status():
+    global trading_active
     # Get current auth status with validation
     auth_status = kite_service.token_status()
+    
+    # Log the actual status being returned for debugging
+    logger.debug(f"[TRADING_STATUS] active={trading_active}, auth={auth_status.value}")
+    
     return {
         "active": trading_active,
         "authenticated": auth_status.value == "authenticated",
