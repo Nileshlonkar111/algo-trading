@@ -22,9 +22,12 @@ const API_BASE_URL = getApiBaseUrl();
 console.log('API_BASE_URL set to:', API_BASE_URL);
 
 let authToken = localStorage.getItem('authToken');
-let refreshInterval = null;
+let wsClient = null; // WebSocket client instance
 let isCheckingKiteStatus = false;
 let isCheckingTradingStatus = false;
+
+// Connection state indicator
+let connectionStatusEl = null;
 
 // Utility Functions
 function showScreen(screenId) {
@@ -97,11 +100,17 @@ function logout() {
     authToken = null;
     localStorage.removeItem('authToken');
     localStorage.removeItem('username');
-    clearInterval(refreshInterval);
+    
+    // Disconnect WebSocket
+    if (wsClient) {
+        wsClient.disconnect();
+        wsClient = null;
+    }
+    
     showScreen('loginScreen');
 }
 
-// Initialize Dashboard
+// Initialize Dashboard with WebSocket
 async function initDashboard() {
     // Show loading states
     document.getElementById('kiteStatus').textContent = 'Checking...';
@@ -110,47 +119,183 @@ async function initDashboard() {
     // Load data with proper sequencing
     try {
         await loadConfig();
-        await updateDashboard(); // Single call to load all dashboard data
-        startAutoRefresh();
+        
+        // Initialize WebSocket connection for real-time updates
+        initWebSocket();
+        
     } catch (error) {
         console.error('Dashboard initialization error:', error);
         showError('loginError', 'Failed to initialize dashboard: ' + error.message);
     }
 }
 
-function startAutoRefresh() {
-    refreshInterval = setInterval(async () => {
-        try {
-            // Single aggregated API call instead of 6 separate calls
-            await updateDashboard();
-        } catch (error) {
-            console.error('Auto-refresh error:', error);
-            // Don't stop refresh on individual errors
+/**
+ * Initialize WebSocket connection for real-time updates
+ * Replaces the polling mechanism with push-based updates
+ */
+function initWebSocket() {
+    console.log('[DASHBOARD] Initializing WebSocket connection...');
+    
+    // Create WebSocket client with configuration
+    wsClient = new WebSocketClient('/ws', {
+        reconnectDelay: 1000,
+        maxReconnectDelay: 30000,
+        reconnectBackoffMultiplier: 1.5,
+        heartbeatInterval: 30000,
+        stateUpdateDebounceTime: 100 // Debounce UI updates to prevent flickering
+    });
+    
+    // Handle connection open
+    wsClient.on('open', () => {
+        console.log('[DASHBOARD] ✅ WebSocket connected');
+        updateConnectionStatus('connected');
+    });
+    
+    // Handle connection close
+    wsClient.on('close', () => {
+        console.log('[DASHBOARD] ⚠️ WebSocket disconnected');
+        updateConnectionStatus('disconnected');
+    });
+    
+    // Handle connection errors
+    wsClient.on('error', (error) => {
+        console.error('[DASHBOARD] WebSocket error:', error);
+        updateConnectionStatus('error');
+    });
+    
+    // Handle state changes
+    wsClient.on('stateChange', ({ oldState, newState }) => {
+        console.log(`[DASHBOARD] Connection state: ${oldState} → ${newState}`);
+        
+        if (newState === 'reconnecting') {
+            updateConnectionStatus('reconnecting');
+        } else if (newState === 'connected') {
+            updateConnectionStatus('connected');
+        } else if (newState === 'disconnected') {
+            updateConnectionStatus('disconnected');
         }
-    }, 5000); // Refresh every 5 seconds
+    });
+    
+    // Handle incoming messages
+    wsClient.on('message', (message) => {
+        handleWebSocketMessage(message);
+    });
+    
+    // Connect to WebSocket
+    wsClient.connect();
 }
 
-async function updateDashboard() {
-    const requestTimestamp = Date.now();
+/**
+ * Handle incoming WebSocket messages
+ * Updates UI based on message type with built-in deduplication
+ */
+function handleWebSocketMessage(message) {
+    const messageType = message.type;
     
-    try {
-        const data = await apiCall('/dashboard/status');
-        
-        // Only update UI if this is the latest request (prevent race conditions)
-        if (requestTimestamp < latestTradingStatusTimestamp) return;
-        latestTradingStatusTimestamp = requestTimestamp;
-        
-        // Update all UI components from single response
-        updateTradingStatusFromData(data.trading);
-        updatePnLFromData(data.pnl);
-        updatePositionsFromData(data.positions);
-        updateTradeLogsFromData(data.logs);
-        updateNotificationsFromData(data.notifications);
-    } catch (error) {
-        if (requestTimestamp < latestTradingStatusTimestamp) return;
-        latestTradingStatusTimestamp = requestTimestamp;
-        console.error('Failed to update dashboard:', error);
+    console.log('[DASHBOARD] Processing message:', messageType);
+    
+    switch (messageType) {
+        case 'dashboard_update':
+            // Complete dashboard update with all sections
+            updateDashboardFromWebSocket(message.data);
+            break;
+            
+        case 'trading_status':
+            // Trading status update only
+            if (message.data) {
+                updateTradingStatusFromData(message.data);
+            }
+            break;
+            
+        case 'notification':
+            // New notification received
+            handleNotificationMessage(message.data);
+            break;
+            
+        case 'position_closed':
+            // Position closed event
+            console.log('[DASHBOARD] Position closed:', message.data);
+            break;
+            
+        case 'order_executed':
+            // Order execution event
+            console.log('[DASHBOARD] Order executed:', message.data);
+            break;
+            
+        case 'connection_established':
+            console.log('[DASHBOARD] Connection established with server');
+            break;
+            
+        default:
+            console.log('[DASHBOARD] Unknown message type:', messageType);
     }
+}
+
+/**
+ * Update entire dashboard from WebSocket data
+ * This replaces the polling-based updateDashboard function
+ */
+function updateDashboardFromWebSocket(data) {
+    // Update all UI components from WebSocket message
+    // The WebSocket manager already handles deduplication
+    if (data.trading) {
+        updateTradingStatusFromData(data.trading);
+    }
+    
+    if (data.pnl) {
+        updatePnLFromData(data.pnl);
+    }
+    
+    if (data.positions) {
+        updatePositionsFromData(data.positions);
+    }
+    
+    if (data.logs) {
+        updateTradeLogsFromData(data.logs);
+    }
+    
+    if (data.notifications) {
+        updateNotificationsFromData(data.notifications);
+    }
+}
+
+/**
+ * Handle notification messages from WebSocket
+ */
+function handleNotificationMessage(notification) {
+    console.log('[DASHBOARD] New notification:', notification);
+    // Notification will be included in next dashboard update
+}
+
+/**
+ * Update connection status indicator
+ */
+function updateConnectionStatus(status) {
+    // Create status indicator if it doesn't exist
+    if (!connectionStatusEl) {
+        const navbar = document.querySelector('.navbar .nav-actions');
+        if (navbar) {
+            connectionStatusEl = document.createElement('span');
+            connectionStatusEl.id = 'ws-connection-status';
+            connectionStatusEl.style.marginRight = '15px';
+            navbar.insertBefore(connectionStatusEl, navbar.firstChild);
+        }
+    }
+    
+    if (!connectionStatusEl) return;
+    
+    // Update status display
+    const statusMap = {
+        connected: { text: '🟢 Live', class: 'ws-connected' },
+        connecting: { text: '🟡 Connecting...', class: 'ws-connecting' },
+        reconnecting: { text: '🟡 Reconnecting...', class: 'ws-reconnecting' },
+        disconnected: { text: '🔴 Disconnected', class: 'ws-disconnected' },
+        error: { text: '🔴 Error', class: 'ws-error' }
+    };
+    
+    const statusInfo = statusMap[status] || statusMap.disconnected;
+    connectionStatusEl.textContent = statusInfo.text;
+    connectionStatusEl.className = statusInfo.class;
 }
 
 function updateTradingStatusFromData(trading) {
@@ -388,8 +533,9 @@ document.getElementById('toggleTradingBtn').addEventListener('click', async () =
             await apiCall('/trading/start', { method: 'POST' });
             alert('Trading started successfully');
         }
-        // Use aggregated endpoint instead of separate call
-        await updateDashboard();
+        
+        // WebSocket will automatically push the updated status
+        // No need to manually refresh
     } catch (error) {
         console.error('Trading toggle error:', error);
         
@@ -637,3 +783,10 @@ if (authToken) {
 } else {
     showScreen('loginScreen');
 }
+
+// Cleanup on page unload
+window.addEventListener('beforeunload', () => {
+    if (wsClient) {
+        wsClient.disconnect();
+    }
+});

@@ -1,3 +1,27 @@
+/* WebSocket Connection Status Indicator */
+#ws-connection-status {
+    font-size: 0.9em;
+    padding: 4px 12px;
+    border-radius: 4px;
+    font-weight: 500;
+    display: inline-block;
+}
+
+.ws-connected {
+    background-color: rgba(76, 175, 80, 0.1);
+    color: #4CAF50;
+}
+
+.ws-connecting, .ws-reconnecting {
+    background-color: rgba(255, 193, 7, 0.1);
+    color: #FFC107;
+}
+
+.ws-disconnected, .ws-error {
+    background-color: rgba(244, 67, 54, 0.1);
+    color: #f44336;
+}
+
 * {
     margin: 0;
     padding: 0;

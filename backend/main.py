@@ -1,9 +1,10 @@
-from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from kite_service import KiteService, TokenStatus
 from trading_engine import TradingEngine
 from auth import authenticate_user, create_access_token, require_auth
+from websocket_manager import manager as ws_manager, heartbeat_task
 from datetime import timedelta
 import os
 from dotenv import load_dotenv
@@ -12,6 +13,7 @@ import asyncio
 import logging
 import sys
 import datetime as dt
+import uuid
 
 load_dotenv()
 
@@ -27,6 +29,9 @@ logger = logging.getLogger(__name__)
 logger.info("[STARTUP] Application logging configured")
 
 app = FastAPI(title="Algo Trading Platform", version="1.0.0")
+
+# WebSocket broadcast task
+broadcast_task_handle = None
 
 # CORS configuration
 app.add_middleware(
@@ -68,7 +73,24 @@ trading_config = {
     "min_vwap_distance_pct": float(os.getenv("MIN_VWAP_DISTANCE_PCT", "0.15")),
 }
 
-trading_engine = TradingEngine(kite_service.kite, trading_config, notify=notification_handler)
+# Modified notification handler to also broadcast via WebSocket
+def notification_handler_with_ws(event_type: str, data: dict):
+    """Handle notifications, store them, and broadcast via WebSocket"""
+    notification = {
+        "timestamp": data.get("time", ""),
+        "type": event_type,
+        "data": data
+    }
+    notifications.append(notification)
+    print(f"[NOTIFICATION] {event_type}: {data}")
+    
+    # Broadcast via WebSocket
+    asyncio.create_task(ws_manager.broadcast({
+        "type": "notification",
+        "data": notification
+    }))
+
+trading_engine = TradingEngine(kite_service.kite, trading_config, notify=notification_handler_with_ws)
 
 TRADING_STATE_FILE = "trading_state.json"
 
@@ -252,6 +274,125 @@ def close_all_positions():
         return {"status": "success", "message": "All positions closed"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# WebSocket endpoint
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    """
+    WebSocket endpoint for real-time updates
+    Provides: trading status, positions, P&L, logs, notifications
+    """
+    client_id = str(uuid.uuid4())
+    
+    try:
+        await ws_manager.connect(websocket, client_id)
+        logger.info(f"[WS_ENDPOINT] Client {client_id} connected")
+        
+        # Send initial state immediately after connection
+        try:
+            auth_status = kite_service.token_status()
+            initial_state = {
+                "type": "dashboard_update",
+                "data": {
+                    "trading": {
+                        "active": trading_active,
+                        "authenticated": auth_status.value == "authenticated",
+                        "token_status": auth_status.value,
+                        "open_positions": sum(1 for p in trading_engine.positions.values() if p["status"] == "OPEN")
+                    },
+                    "pnl": {
+                        "realized_pnl": trading_engine.get_pnl(),
+                        "daily_pl_ratio": trading_engine.daily_pl_ratio()
+                    },
+                    "positions": trading_engine.get_positions(),
+                    "logs": trading_engine.get_trade_logs()[-20:] if len(trading_engine.get_trade_logs()) > 0 else [],
+                    "notifications": notifications[-20:] if len(notifications) > 0 else []
+                }
+            }
+            await ws_manager.send_personal_message(initial_state, client_id)
+        except Exception as e:
+            logger.error(f"[WS_ENDPOINT] Failed to send initial state: {e}")
+        
+        # Keep connection alive and handle incoming messages
+        while True:
+            try:
+                # Receive messages from client (e.g., pong responses)
+                data = await websocket.receive_json()
+                await ws_manager.handle_client_message(data, client_id)
+            except WebSocketDisconnect:
+                logger.info(f"[WS_ENDPOINT] Client {client_id} disconnected normally")
+                break
+            except Exception as e:
+                logger.error(f"[WS_ENDPOINT] Error receiving message from {client_id}: {e}")
+                break
+                
+    except Exception as e:
+        logger.error(f"[WS_ENDPOINT] Connection error for {client_id}: {e}", exc_info=True)
+    finally:
+        await ws_manager.disconnect(client_id)
+
+
+async def broadcast_updates_task():
+    """
+    Background task to periodically broadcast dashboard updates to all WebSocket clients
+    Replaces the polling mechanism with server-push updates
+    """
+    logger.info("[WS_BROADCAST] Broadcast task started")
+    
+    while True:
+        try:
+            # Only broadcast if there are connected clients
+            if ws_manager.get_connection_count() > 0:
+                auth_status = kite_service.token_status()
+                
+                dashboard_data = {
+                    "type": "dashboard_update",
+                    "data": {
+                        "trading": {
+                            "active": trading_active,
+                            "authenticated": auth_status.value == "authenticated",
+                            "token_status": auth_status.value,
+                            "open_positions": sum(1 for p in trading_engine.positions.values() if p["status"] == "OPEN")
+                        },
+                        "pnl": {
+                            "realized_pnl": trading_engine.get_pnl(),
+                            "daily_pl_ratio": trading_engine.daily_pl_ratio()
+                        },
+                        "positions": trading_engine.get_positions(),
+                        "logs": trading_engine.get_trade_logs()[-20:] if len(trading_engine.get_trade_logs()) > 0 else [],
+                        "notifications": notifications[-20:] if len(notifications) > 0 else []
+                    }
+                }
+                
+                # Broadcast will automatically filter duplicates to prevent flickering
+                sent_count = await ws_manager.broadcast(dashboard_data)
+                
+                if sent_count > 0:
+                    logger.debug(f"[WS_BROADCAST] Dashboard update sent to {sent_count} clients")
+            
+            # Broadcast every 2 seconds (more frequent than polling, but filtered for changes)
+            await asyncio.sleep(2)
+            
+        except Exception as e:
+            logger.error(f"[WS_BROADCAST_ERROR] {e}", exc_info=True)
+            await asyncio.sleep(5)
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Start background tasks on application startup"""
+    global broadcast_task_handle
+    
+    logger.info("[STARTUP] Starting background tasks")
+    
+    # Start heartbeat task for WebSocket connection health
+    asyncio.create_task(heartbeat_task())
+    
+    # Start broadcast task for real-time updates
+    broadcast_task_handle = asyncio.create_task(broadcast_updates_task())
+    
+    logger.info("[STARTUP] Background tasks started successfully")
+
 
 # Trading loop background task
 async def trading_loop():
