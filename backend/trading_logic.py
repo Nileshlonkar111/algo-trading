@@ -6,6 +6,7 @@ from typing import Optional, Dict, List, Tuple
 from kiteconnect import KiteConnect
 import logging
 from functools import wraps
+import pytz
 
 class TradingLogic:
     """Complete trading logic ported from v1.1.py"""
@@ -22,6 +23,7 @@ class TradingLogic:
         self._instruments_cache = None
         self._instruments_cache_ts = None
         self._option_index = {}
+        self.timezone = pytz.timezone('Asia/Kolkata')
 
     def retry_on_exception(retries=3, delay=1):
         def decorator(func):
@@ -43,11 +45,11 @@ class TradingLogic:
     @retry_on_exception(retries=3, delay=2)
     def load_instruments(self, force=False):
         if self._instruments_cache is not None and not force:
-            if self._instruments_cache_ts and (dt.datetime.now() - self._instruments_cache_ts).total_seconds() < self.CACHE_DURATION_SECONDS:
+            if self._instruments_cache_ts and (dt.datetime.now(self.timezone) - self._instruments_cache_ts).total_seconds() < self.CACHE_DURATION_SECONDS:
                 return self._instruments_cache
         TradingLogic.logger.info("Loading instruments (NFO)...")
         self._instruments_cache = self.kite.instruments("NFO")
-        self._instruments_cache_ts = dt.datetime.now()
+        self._instruments_cache_ts = dt.datetime.now(self.timezone)
         self._build_option_index()
         return self._instruments_cache
     
@@ -70,10 +72,10 @@ class TradingLogic:
     
     def get_next_expiry(self) -> dt.date:
         """Return next weekly expiry (Tuesday); if today is Tuesday after 15:30, jump to next week."""
-        today = dt.date.today()
-        days_ahead = (1 - today.weekday()) % 7
-        expiry = today + timedelta(days=days_ahead)
-        if today.weekday() == 1 and dt.datetime.now().time() > self.MARKET_CLOSE_TIME:
+        today_ist = dt.datetime.now(self.timezone).date()
+        days_ahead = (1 - today_ist.weekday()) % 7
+        expiry = today_ist + timedelta(days=days_ahead)
+        if today_ist.weekday() == 1 and dt.datetime.now(self.timezone).time() > self.MARKET_CLOSE_TIME:
             expiry += timedelta(days=7)
         return expiry
     
@@ -106,12 +108,18 @@ class TradingLogic:
     @retry_on_exception(retries=3, delay=2)
     def fetch_spot_5m(self, nifty_token, days=2):
         """Fetch 5-minute historical data with live candle injection during market hours"""
-        to_dt = dt.datetime.now()
-        from_dt = to_dt - timedelta(days=days)
+        # Use IST timezone for all datetime operations
+        now = dt.datetime.now(self.timezone)
+        to_dt = now
+        from_dt = now - timedelta(days=days)
+        
+        TradingLogic.logger.info(f"[FETCH_SPOT] Fetching historical data from {from_dt.strftime('%Y-%m-%d %H:%M IST')} to {to_dt.strftime('%Y-%m-%d %H:%M IST')}")
         
         # Fetch completed historical candles
         data = self.kite.historical_data(nifty_token, from_dt, to_dt, "5minute")
         df = pd.DataFrame(data)
+        
+        TradingLogic.logger.info(f"[FETCH_SPOT] Received {len(data)} candles from API")
         
         if "date" in df.columns:
             df.rename(columns={"date": "datetime"}, inplace=True)
@@ -119,11 +127,13 @@ class TradingLogic:
             df["datetime"] = pd.to_datetime(df["datetime"])
         
         # During market hours (9:15-15:30), inject current live candle
-        now = dt.datetime.now()
         market_start = now.replace(hour=9, minute=15, second=0, microsecond=0)
         market_end = now.replace(hour=15, minute=30, second=0, microsecond=0)
         
-        if market_start <= now <= market_end and not df.empty:
+        is_market_hours = market_start <= now <= market_end
+        TradingLogic.logger.info(f"[FETCH_SPOT] Current time: {now.strftime('%H:%M:%S IST')}, Market hours: {is_market_hours}")
+        
+        if is_market_hours and not df.empty:
             try:
                 TradingLogic.logger.info(f"[LIVE_DATA] Market hours detected, fetching live quote for token {nifty_token}...")
                 
@@ -165,14 +175,20 @@ class TradingLogic:
                         if hasattr(last_hist_time, 'tz_localize'):
                             last_hist_time = last_hist_time.tz_localize(None)
                         
+                        TradingLogic.logger.info(f"[LIVE_DATA] Last historical candle: {last_hist_time.strftime('%Y-%m-%d %H:%M')}, Current candle start: {current_candle_start.strftime('%Y-%m-%d %H:%M')}")
+                        
                         if last_hist_time >= current_candle_start:
-                            # Update existing candle with live data
-                            df.iloc[-1] = live_candle
-                            TradingLogic.logger.info(f"[LIVE_DATA] ✅ Updated incomplete candle at {current_candle_start.strftime('%H:%M')} with live price {last_price:.2f}")
+                            # Update existing incomplete candle with live data
+                            df.iloc[-1, df.columns.get_loc('open')] = live_candle['open']
+                            df.iloc[-1, df.columns.get_loc('high')] = live_candle['high']
+                            df.iloc[-1, df.columns.get_loc('low')] = live_candle['low']
+                            df.iloc[-1, df.columns.get_loc('close')] = live_candle['close']
+                            df.iloc[-1, df.columns.get_loc('volume')] = live_candle['volume']
+                            TradingLogic.logger.info(f"[LIVE_DATA] ✅ Updated incomplete candle at {current_candle_start.strftime('%Y-%m-%d %H:%M')} with live price {last_price:.2f}")
                         else:
-                            # Append new live candle
+                            # Append new live candle (for gap between last historical and current)
                             df = pd.concat([df, pd.DataFrame([live_candle])], ignore_index=True)
-                            TradingLogic.logger.info(f"[LIVE_DATA] ✅ Injected new live candle at {current_candle_start.strftime('%H:%M')} with price {last_price:.2f}")
+                            TradingLogic.logger.info(f"[LIVE_DATA] ✅ Injected new live candle at {current_candle_start.strftime('%Y-%m-%d %H:%M')} with price {last_price:.2f}")
                     else:
                         TradingLogic.logger.warning(f"[LIVE_DATA] Quote data not found in response keys: {list(quote.keys())}")
                         
@@ -181,15 +197,18 @@ class TradingLogic:
                 import traceback
                 TradingLogic.logger.debug(f"[LIVE_DATA] Traceback: {traceback.format_exc()}")
                 # Continue with historical data only
-        elif market_start <= now <= market_end and df.empty:
-            TradingLogic.logger.warning(f"[LIVE_DATA] Market hours but no historical data available")
+        elif is_market_hours and df.empty:
+            TradingLogic.logger.warning(f"[LIVE_DATA] ⚠️ Market hours but no historical data available from API")
+        elif not is_market_hours:
+            TradingLogic.logger.info(f"[LIVE_DATA] Outside market hours, using historical data only")
         
         return df
     
     def fetch_fut_5m(self, fut_token, days=2):
         """Fetch 5-minute futures data - live injection handled separately via tradingsymbol"""
         try:
-            to_dt = dt.datetime.now()
+            # Use IST timezone
+            to_dt = dt.datetime.now(self.timezone)
             from_dt = to_dt - timedelta(days=days)
             data = self.kite.historical_data(fut_token, from_dt, to_dt, "5minute")
             df = pd.DataFrame(data)
@@ -207,7 +226,8 @@ class TradingLogic:
         if df is None or df.empty:
             return df
         
-        now = dt.datetime.now()
+        # Use IST timezone
+        now = dt.datetime.now(self.timezone)
         market_start = now.replace(hour=9, minute=15, second=0, microsecond=0)
         market_end = now.replace(hour=15, minute=30, second=0, microsecond=0)
         
@@ -297,7 +317,7 @@ class TradingLogic:
         """
         try:
             instruments = self.load_instruments()
-            today = dt.date.today()
+            today = dt.datetime.now(self.timezone).date()
             nearest_fut = None
             nearest_expiry = None
             for inst in instruments:

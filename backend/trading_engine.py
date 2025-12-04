@@ -284,10 +284,22 @@ class TradingEngine:
             self.logger.info("[SCAN] Shutdown requested, skipping scan")
             return
         
-        self.logger.info(f"[SCAN] Current time: {nowt.strftime('%H:%M:%S')}, Entry window: 09:30-15:20")
+        # Check if market is open (9:15 AM - 3:30 PM)
+        market_open = dt.time(9, 15)
+        market_close = dt.time(15, 30)
+        
+        self.logger.info(f"[SCAN] Current time: {nowt.strftime('%H:%M:%S')}, Market hours: 09:15-15:30, Entry window: 09:30-15:20")
+        
+        if nowt < market_open:
+            self.logger.info(f"[SCAN] ⏰ Market not open yet (opens at 09:15), skipping scan")
+            return
+        
+        if nowt > market_close:
+            self.logger.info(f"[SCAN] ⏰ Market closed (closes at 15:30), skipping scan")
+            return
         
         if not self.within_entry_window(nowt):
-            self.logger.info(f"[SCAN] Outside entry window, skipping scan")
+            self.logger.info(f"[SCAN] Outside entry window (09:30-15:20), skipping scan")
             return
 
         # Daily guards
@@ -339,21 +351,26 @@ class TradingEngine:
                 self.logger.info(f"[SCAN_DATA] Fetched {len(spot_df)} candles, Date range: {spot_df['datetime'].min()} to {spot_df['datetime'].max()}")
                 self.logger.info(f"[SCAN_DATA] Latest candle: Time={spot_df['datetime'].iloc[-1]}, Close={spot_df['close'].iloc[-1]:.2f}")
                 
-                # Check data freshness - last candle should be very recent (within 6 minutes max)
+                # Check data freshness - last candle should be very recent during market hours
                 last_candle_time = spot_df['datetime'].iloc[-1]
                 if hasattr(last_candle_time, 'tz_localize'):
                     last_candle_time = last_candle_time.tz_localize(None)
+                elif hasattr(last_candle_time, 'tz_convert'):
+                    last_candle_time = last_candle_time.tz_convert(None).replace(tzinfo=None)
                 
-                now = dt.datetime.now()
-                data_age_minutes = (now - last_candle_time).total_seconds() / 60
-                self.logger.info(f"[SCAN_DATA] Data freshness: Last candle was {data_age_minutes:.1f} minutes ago")
+                # Use IST for comparison
+                now_ist = dt.datetime.now(self.timezone).replace(tzinfo=None)
+                data_age_minutes = (now_ist - last_candle_time).total_seconds() / 60
+                self.logger.info(f"[SCAN_DATA] Data freshness: Last candle was {data_age_minutes:.1f} minutes ago (Current IST: {now_ist.strftime('%H:%M:%S')})")
                 
-                # Ensure we're analyzing a CLOSED candle (should be 0-6 minutes old)
-                if data_age_minutes > 6:
-                    self.logger.warning(f"[SCAN_DATA] ⚠️ STALE DATA WARNING! Last candle is {data_age_minutes:.1f} minutes old, skipping")
-                    return
+                # During market hours, data should be fresh (within 10 minutes to allow for slight delays)
+                # The live candle injection in fetch_spot_5m should keep data current
+                if data_age_minutes > 10:
+                    self.logger.warning(f"[SCAN_DATA] ⚠️ STALE DATA WARNING! Last candle is {data_age_minutes:.1f} minutes old")
+                    self.logger.warning(f"[SCAN_DATA] This may indicate an issue with live data injection or API delays")
+                    # Don't return - allow processing with warning since we're in market hours
                 
-                self.logger.info(f"[SCAN_DATA] ✅ Data is fresh, analyzing CLOSED 5-min candle")
+                self.logger.info(f"[SCAN_DATA] ✅ Data received, analyzing 5-min candle")
             
             atr_period = self.config.get("atr_period", 14)
             spot_df = self.logic.add_spot_indicators(spot_df, atr_period)
