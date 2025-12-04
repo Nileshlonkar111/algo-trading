@@ -22,43 +22,97 @@ const API_BASE_URL = getApiBaseUrl();
 console.log('API_BASE_URL set to:', API_BASE_URL);
 // --- WebSocket for status updates ---
 let statusSocket = null;
+let wsReconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 10;
+const RECONNECT_DELAY = 3000;
+
 function connectStatusWebSocket() {
+    // Check if already authenticated
+    if (!authToken) {
+        console.log('[WEBSOCKET] Not authenticated, skipping WebSocket connection');
+        return;
+    }
+
     const wsProtocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
     const wsHost = window.location.hostname;
     const wsPort = window.location.port ? ':' + window.location.port : '';
-    // Remove /api if present in base URL
-    const wsPath = '/ws/status';
+    
+    // For production with /api prefix
+    let wsPath = '/ws/status';
+    if (window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+        wsPath = '/api/ws/status';
+    }
+    
     const wsUrl = `${wsProtocol}://${wsHost}${wsPort}${wsPath}`;
-    statusSocket = new WebSocket(wsUrl);
+    
+    console.log('[WEBSOCKET] Connecting to:', wsUrl);
+    
+    try {
+        statusSocket = new WebSocket(wsUrl);
 
-    statusSocket.onopen = () => {
-        console.log('WebSocket connected:', wsUrl);
-    };
-    statusSocket.onmessage = (event) => {
-        try {
-            const data = JSON.parse(event.data);
-            // You may need to adjust this depending on backend message format
-            if (data.type === 'status') {
-                updateTradingStatusFromData(data.trading);
-                updatePnLFromData(data.pnl);
-                updatePositionsFromData(data.positions);
-                updateTradeLogsFromData(data.logs);
-                updateNotificationsFromData(data.notifications);
+        statusSocket.onopen = () => {
+            console.log('[WEBSOCKET] Connected successfully');
+            wsReconnectAttempts = 0; // Reset reconnect counter on success
+        };
+        
+        statusSocket.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                console.log('[WEBSOCKET] Received data:', data);
+                
+                // Update UI with received data
+                if (data.trading) {
+                    updateTradingStatusFromData(data.trading);
+                }
+                if (data.pnl) {
+                    updatePnLFromData(data.pnl);
+                }
+                if (data.positions) {
+                    updatePositionsFromData(data.positions);
+                }
+                if (data.logs) {
+                    updateTradeLogsFromData(data.logs);
+                }
+                if (data.notifications) {
+                    updateNotificationsFromData(data.notifications);
+                }
+            } catch (e) {
+                console.error('[WEBSOCKET] Error parsing message:', e, event.data);
             }
-        } catch (e) {
-            console.warn('WebSocket message parse error:', e, event.data);
-        }
-    };
-    statusSocket.onclose = () => {
-        console.warn('WebSocket closed, retrying in 3s...');
-        setTimeout(connectStatusWebSocket, 3000);
-    };
-    statusSocket.onerror = (err) => {
-        console.error('WebSocket error:', err);
-        statusSocket.close();
-    };
+        };
+        
+        statusSocket.onclose = (event) => {
+            console.warn('[WEBSOCKET] Connection closed:', event.code, event.reason);
+            statusSocket = null;
+            
+            // Implement exponential backoff for reconnection
+            if (wsReconnectAttempts < MAX_RECONNECT_ATTEMPTS && authToken) {
+                wsReconnectAttempts++;
+                const delay = RECONNECT_DELAY * wsReconnectAttempts;
+                console.log(`[WEBSOCKET] Reconnecting in ${delay/1000}s (attempt ${wsReconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`);
+                setTimeout(connectStatusWebSocket, delay);
+            } else if (wsReconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+                console.error('[WEBSOCKET] Max reconnection attempts reached');
+            }
+        };
+        
+        statusSocket.onerror = (err) => {
+            console.error('[WEBSOCKET] Error:', err);
+        };
+    } catch (error) {
+        console.error('[WEBSOCKET] Failed to create WebSocket:', error);
+    }
 }
-connectStatusWebSocket();
+
+// Disconnect WebSocket when logging out
+function disconnectWebSocket() {
+    if (statusSocket) {
+        console.log('[WEBSOCKET] Disconnecting...');
+        statusSocket.close();
+        statusSocket = null;
+        wsReconnectAttempts = 0;
+    }
+}
 
 let authToken = localStorage.getItem('authToken');
 let refreshInterval = null;
@@ -124,6 +178,10 @@ document.getElementById('loginForm').addEventListener('submit', async (e) => {
         
         document.getElementById('username-display').textContent = username;
         showScreen('dashboardScreen');
+        
+        // Connect WebSocket after authentication
+        connectStatusWebSocket();
+        
         initDashboard();
     } catch (error) {
         showError('loginError', error.message);
@@ -133,6 +191,7 @@ document.getElementById('loginForm').addEventListener('submit', async (e) => {
 document.getElementById('logoutBtn').addEventListener('click', logout);
 
 function logout() {
+    disconnectWebSocket();
     authToken = null;
     localStorage.removeItem('authToken');
     localStorage.removeItem('username');
@@ -675,6 +734,10 @@ if (authToken) {
     const username = localStorage.getItem('username');
     document.getElementById('username-display').textContent = username;
     showScreen('dashboardScreen');
+    
+    // Connect WebSocket if already authenticated
+    connectStatusWebSocket();
+    
     initDashboard();
 } else {
     showScreen('loginScreen');

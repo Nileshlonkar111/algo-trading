@@ -1,5 +1,3 @@
-# Add WebSocket router for status updates
-from websocket_status import router as websocket_status_router
 from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -298,8 +296,12 @@ async def trading_loop():
 def health_check():
     return {"status": "healthy", "version": "1.0.0"}
 
+# Mount WebSocket router and register dashboard status function
+from websocket_status import router as websocket_status_router, set_dashboard_status_fn
+app.include_router(websocket_status_router)
+set_dashboard_status_fn(get_dashboard_status)
+logger.info("[STARTUP] WebSocket router mounted and dashboard status function registered")
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host=os.getenv("HOST", "0.0.0.0"), port=int(os.getenv("PORT", "8000")))
-# Mount the WebSocket router for status updates
-app.include_router(websocket_status_router)
