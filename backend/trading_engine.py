@@ -440,6 +440,8 @@ class TradingEngine:
                 self.logger.warning(f"[SCAN] Not enough FUT candles: {len(fut_df) if fut_df is not None else 0}/10")
                 return
             
+            # Inject live candle for futures
+            fut_df = self.logic.inject_live_candle(fut_df, f"NFO:{fut_symbol}")
             fut_df = self.logic.compute_vwap(fut_df)
             fut_last = fut_df.iloc[-1]
             vwap_direction_ok = (signal_side == "CE" and fut_last["close"] > fut_last["VWAP"]) or \
