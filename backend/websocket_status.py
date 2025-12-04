@@ -20,12 +20,25 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
+import asyncio
+from main import get_dashboard_status
+
 @router.websocket("/ws/status")
 async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
+    async def send_status():
+        while True:
+            try:
+                # Get dashboard status and broadcast to all clients
+                status_data = get_dashboard_status()
+                await manager.broadcast(status_data.json())
+                await asyncio.sleep(2)
+            except Exception:
+                break
+    status_task = asyncio.create_task(send_status())
     try:
         while True:
-            # Keep the connection alive, optionally receive messages if needed
             await websocket.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(websocket)
+        status_task.cancel()
