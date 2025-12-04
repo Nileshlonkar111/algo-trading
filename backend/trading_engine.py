@@ -2,6 +2,7 @@ import datetime as dt
 from typing import List, Dict, Optional, Callable, Any
 from kiteconnect import KiteConnect
 from trading_logic import TradingLogic
+from telegram_notifier import TelegramNotifier
 import pandas as pd
 import time
 import logging
@@ -45,6 +46,9 @@ class TradingEngine:
         self.logger = logging.getLogger("TradingEngine")
         self.timezone = pytz.timezone('Asia/Kolkata')
         self._shutdown_requested = False
+        self.telegram = TelegramNotifier()
+        self.session_start_time = dt.datetime.now(self.timezone).strftime("%Y-%m-%d %H:%M:%S")
+        self.session_summary_sent = False
         
         # Configure logging to ensure output to stdout
         self.logger.setLevel(logging.DEBUG)
@@ -400,9 +404,37 @@ class TradingEngine:
         if prev_spot["EMA5"] <= prev_spot["EMA20"] and last_spot["EMA5"] > last_spot["EMA20"]:
             signal_side = "CE"
             self.logger.info(f"[SCAN_SIGNAL] 🔵 BULLISH EMA CROSSOVER DETECTED! EMA5 crossed above EMA20 - Signal: {signal_side}")
+            
+            # Send Telegram alert for bullish crossover
+            try:
+                spot_ltp = last_spot["close"]
+                atm = self.logic.round_to_50(spot_ltp)
+                self.telegram.send_ema_crossover_alert(
+                    signal_side=signal_side,
+                    ema5=last_spot["EMA5"],
+                    ema20=last_spot["EMA20"],
+                    spot_ltp=spot_ltp,
+                    atm=atm
+                )
+            except Exception as e:
+                self.logger.error(f"[TELEGRAM] Failed to send bullish crossover alert: {e}")
         elif prev_spot["EMA5"] >= prev_spot["EMA20"] and last_spot["EMA5"] < last_spot["EMA20"]:
             signal_side = "PE"
             self.logger.info(f"[SCAN_SIGNAL] 🔴 BEARISH EMA CROSSOVER DETECTED! EMA5 crossed below EMA20 - Signal: {signal_side}")
+            
+            # Send Telegram alert for bearish crossover
+            try:
+                spot_ltp = last_spot["close"]
+                atm = self.logic.round_to_50(spot_ltp)
+                self.telegram.send_ema_crossover_alert(
+                    signal_side=signal_side,
+                    ema5=last_spot["EMA5"],
+                    ema20=last_spot["EMA20"],
+                    spot_ltp=spot_ltp,
+                    atm=atm
+                )
+            except Exception as e:
+                self.logger.error(f"[TELEGRAM] Failed to send bearish crossover alert: {e}")
         else:
             self.logger.info(f"[SCAN_EMA] No crossover - EMA5 {'above' if last_spot['EMA5'] > last_spot['EMA20'] else 'below'} EMA20 (diff: {abs(last_spot['EMA5'] - last_spot['EMA20']):.2f})")
 
@@ -733,3 +765,55 @@ class TradingEngine:
                 except Exception as notify_error:
                     self.logger.error(f"[NOTIFY] Failed to send error notification: {notify_error}")
             raise
+    
+    def send_end_of_day_summary(self) -> bool:
+        """Send comprehensive trading session summary to Telegram at end of day (after 3:30 PM)"""
+        try:
+            now = dt.datetime.now(self.timezone)
+            market_close = dt.time(15, 30)
+            
+            # Check if market has closed
+            if now.time() < market_close:
+                self.logger.debug(f"[EOD_SUMMARY] Market not closed yet ({now.time().strftime('%H:%M')}), skipping summary")
+                return False
+            
+            # Check if summary already sent today
+            if self.session_summary_sent:
+                self.logger.debug("[EOD_SUMMARY] Summary already sent for today")
+                return False
+            
+            session_end_time = now.strftime("%Y-%m-%d %H:%M:%S")
+            capital = self.config.get("capital_base", 300000)
+            
+            self.logger.info("[EOD_SUMMARY] Generating end-of-day trading session summary...")
+            
+            # Send summary via Telegram
+            success = self.telegram.send_session_summary(
+                trade_logs=self.trade_logs,
+                positions=self.positions,
+                realized_pnl=self.realized_pnl,
+                capital_base=capital,
+                session_start=self.session_start_time,
+                session_end=session_end_time
+            )
+            
+            if success:
+                self.session_summary_sent = True
+                self.logger.info("[EOD_SUMMARY] ✅ Session summary sent successfully to Telegram")
+            else:
+                self.logger.warning("[EOD_SUMMARY] ⚠️ Failed to send session summary")
+            
+            return success
+            
+        except Exception as e:
+            self.logger.error(f"[EOD_SUMMARY] Error generating session summary: {e}", exc_info=True)
+            return False
+    
+    def check_and_send_eod_summary(self) -> None:
+        """Check if it's time to send EOD summary and send if appropriate"""
+        now = dt.datetime.now(self.timezone)
+        market_close = dt.time(15, 30)
+        
+        # Only attempt between 15:30 and 16:00 to avoid repeated attempts
+        if market_close <= now.time() <= dt.time(16, 0) and not self.session_summary_sent:
+            self.send_end_of_day_summary()

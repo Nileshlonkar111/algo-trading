@@ -400,6 +400,9 @@ async def trading_loop():
                     trading_engine.scan_and_maybe_enter_once()
                     last_scan_minute = current_minute
                 
+                # Check if it's time to send end-of-day summary (after 3:30 PM)
+                trading_engine.check_and_send_eod_summary()
+                
                 # Fast monitoring loop - check positions every 3 seconds
                 await asyncio.sleep(3)
                 
