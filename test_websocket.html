@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>WebSocket Test</title>
+</head>
+<body>
+    <h1>WebSocket Connection Test</h1>
+    <div id="status">Not connected</div>
+    <div id="messages"></div>
+    <button onclick="connect()">Connect</button>
+    <button onclick="disconnect()">Disconnect</button>
+
+    <script>
+        let ws = null;
+
+        function connect() {
+            const wsUrl = 'ws://localhost:8000/ws/status';
+            document.getElementById('status').textContent = 'Connecting to ' + wsUrl + '...';
+            
+            ws = new WebSocket(wsUrl);
+            
+            ws.onopen = () => {
+                document.getElementById('status').textContent = 'Connected!';
+                console.log('WebSocket connected');
+            };
+            
+            ws.onmessage = (event) => {
+                console.log('Received:', event.data);
+                const messagesDiv = document.getElementById('messages');
+                const msgDiv = document.createElement('div');
+                msgDiv.textContent = new Date().toLocaleTimeString() + ': ' + event.data.substring(0, 100);
+                messagesDiv.insertBefore(msgDiv, messagesDiv.firstChild);
+            };
+            
+            ws.onclose = (event) => {
+                document.getElementById('status').textContent = 'Disconnected (code: ' + event.code + ', reason: ' + event.reason + ')';
+                console.log('WebSocket closed:', event.code, event.reason);
+            };
+            
+            ws.onerror = (error) => {
+                document.getElementById('status').textContent = 'Error!';
+                console.error('WebSocket error:', error);
+            };
+        }
+
+        function disconnect() {
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+        }
+    </script>
+</body>
+</html>

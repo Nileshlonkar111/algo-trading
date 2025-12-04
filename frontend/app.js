@@ -208,44 +208,41 @@ async function initDashboard() {
     // Load data with proper sequencing
     try {
         await loadConfig();
-        await updateDashboard(); // Single call to load all dashboard data
-        startAutoRefresh();
+        // Initial load - WebSocket will handle updates after this
+        await loadInitialDashboardData();
+        console.log('[DASHBOARD] Initialized - WebSocket handling real-time updates');
     } catch (error) {
         console.error('Dashboard initialization error:', error);
         showError('loginError', 'Failed to initialize dashboard: ' + error.message);
     }
 }
 
-/* function startAutoRefresh() {
-    refreshInterval = setInterval(async () => {
-        try {
-            // Single aggregated API call instead of 6 separate calls
-            await updateDashboard();
-        } catch (error) {
-            console.error('Auto-refresh error:', error);
-            // Don't stop refresh on individual errors
-        }
-    }, 5000); // Refresh every 5 seconds
-} */
-
-async function updateDashboard() {
-    const requestTimestamp = Date.now();
-    
+// Load initial dashboard data on login
+async function loadInitialDashboardData() {
     try {
-        // const data = await apiCall('/dashboard/status');
-        // Only update UI if this is the latest request (prevent race conditions)
-        // if (requestTimestamp < latestTradingStatusTimestamp) return;
-        // latestTradingStatusTimestamp = requestTimestamp;
-        // Update all UI components from single response
-        // updateTradingStatusFromData(data.trading);
-        // updatePnLFromData(data.pnl);
-        // updatePositionsFromData(data.positions);
-        // updateTradeLogsFromData(data.logs);
-        // updateNotificationsFromData(data.notifications);
+        const data = await apiCall('/dashboard/status');
+        
+        // Update all UI components from initial load
+        if (data.trading) {
+            updateTradingStatusFromData(data.trading);
+        }
+        if (data.pnl) {
+            updatePnLFromData(data.pnl);
+        }
+        if (data.positions) {
+            updatePositionsFromData(data.positions);
+        }
+        if (data.logs) {
+            updateTradeLogsFromData(data.logs);
+        }
+        if (data.notifications) {
+            updateNotificationsFromData(data.notifications);
+        }
+        
+        console.log('[DASHBOARD] Initial data loaded successfully');
     } catch (error) {
-        if (requestTimestamp < latestTradingStatusTimestamp) return;
-        latestTradingStatusTimestamp = requestTimestamp;
-        console.error('Failed to update dashboard:', error);
+        console.error('[DASHBOARD] Failed to load initial data:', error);
+        throw error;
     }
 }
 
@@ -489,8 +486,7 @@ document.getElementById('toggleTradingBtn').addEventListener('click', async () =
             await apiCall('/trading/start', { method: 'POST' });
             alert('Trading started successfully');
         }
-        // Use aggregated endpoint instead of separate call
-        await updateDashboard();
+        // WebSocket will update the UI automatically
     } catch (error) {
         console.error('Trading toggle error:', error);
         
