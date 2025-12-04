@@ -296,11 +296,7 @@ async def trading_loop():
 def health_check():
     return {"status": "healthy", "version": "1.0.0"}
 
-# Mount WebSocket router and register dashboard status function
-from websocket_status import router as websocket_status_router, set_dashboard_status_fn
-app.include_router(websocket_status_router)
-set_dashboard_status_fn(get_dashboard_status)
-logger.info("[STARTUP] WebSocket router mounted and dashboard status function registered")
+# No WebSocket router; pure API polling logic restored
 
 if __name__ == "__main__":
     import uvicorn
