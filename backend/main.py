@@ -69,7 +69,27 @@ trading_config = {
 }
 
 trading_engine = TradingEngine(kite_service.kite, trading_config, notify=notification_handler)
-trading_active = False
+
+TRADING_STATE_FILE = "trading_state.json"
+
+def load_trading_active():
+    try:
+        import json
+        with open(TRADING_STATE_FILE, "r") as f:
+            state = json.load(f)
+            return state.get("active", False)
+    except Exception:
+        return False
+
+def save_trading_active(active):
+    try:
+        import json
+        with open(TRADING_STATE_FILE, "w") as f:
+            json.dump({"active": active}, f)
+    except Exception:
+        pass
+
+trading_active = load_trading_active()
 
 # Pydantic models
 class LoginRequest(BaseModel):
@@ -175,6 +195,7 @@ async def start_trading(background_tasks: BackgroundTasks):
         raise HTTPException(status_code=400, detail="Trading already active")
     
     trading_active = True
+    save_trading_active(trading_active)
     background_tasks.add_task(trading_loop)
     logger.info("[TRADING] Trading started successfully")
     return {"status": "started"}
@@ -183,6 +204,7 @@ async def start_trading(background_tasks: BackgroundTasks):
 def stop_trading():
     global trading_active
     trading_active = False
+    save_trading_active(trading_active)
     logger.info("[TRADING] Trading stopped by user")
     return {"status": "stopped"}
 
