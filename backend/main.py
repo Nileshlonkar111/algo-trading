@@ -1,3 +1,5 @@
+# Add WebSocket router for status updates
+from websocket_status import router as websocket_status_router
 from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -299,3 +301,5 @@ def health_check():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host=os.getenv("HOST", "0.0.0.0"), port=int(os.getenv("PORT", "8000")))
+# Mount the WebSocket router for status updates
+app.include_router(websocket_status_router)
