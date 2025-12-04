@@ -194,6 +194,11 @@ async def start_trading(background_tasks: BackgroundTasks):
     if trading_active:
         raise HTTPException(status_code=400, detail="Trading already active")
     
+    trading_active = True
+    save_trading_active(trading_active)
+    background_tasks.add_task(trading_loop)
+    logger.info("[TRADING] Trading started successfully")
+    return {"status": "started"}
 
 @app.get("/dashboard/status", dependencies=[Depends(require_auth)])
 def get_dashboard_status():
@@ -215,11 +220,6 @@ def get_dashboard_status():
         "logs": trading_engine.get_trade_logs()[-20:] if len(trading_engine.get_trade_logs()) > 0 else [],
         "notifications": notifications[-20:] if len(notifications) > 0 else []
     }
-    trading_active = True
-    save_trading_active(trading_active)
-    background_tasks.add_task(trading_loop)
-    logger.info("[TRADING] Trading started successfully")
-    return {"status": "started"}
 
 @app.post("/trading/stop", dependencies=[Depends(require_auth)])
 def stop_trading():
