@@ -49,6 +49,7 @@ class TradingEngine:
         self.telegram = TelegramNotifier()
         self.session_start_time = dt.datetime.now(self.timezone).strftime("%Y-%m-%d %H:%M:%S")
         self.session_summary_sent = False
+        self.last_signal_candle_time = None  # Track last processed signal candle to prevent duplicates
         
         # Configure logging to ensure output to stdout
         self.logger.setLevel(logging.DEBUG)
@@ -399,10 +400,24 @@ class TradingEngine:
         self.logger.info(f"[SCAN_EMA] Previous: EMA5={prev_spot['EMA5']:.2f}, EMA20={prev_spot['EMA20']:.2f}")
         self.logger.info(f"[SCAN_EMA] Current:  EMA5={last_spot['EMA5']:.2f}, EMA20={last_spot['EMA20']:.2f}")
 
-        # EMA crossover signal
+        # EMA crossover signal with duplicate detection
         signal_side = None
+        current_candle_time = spot_df['datetime'].iloc[-1]
+        
+        # Convert to naive datetime for comparison if needed
+        if hasattr(current_candle_time, 'tz') and current_candle_time.tz is not None:
+            current_candle_time = current_candle_time.replace(tzinfo=None)
+        elif hasattr(current_candle_time, 'tz_localize'):
+            current_candle_time = current_candle_time.tz_localize(None)
+        
+        # Check if we already processed a signal for this candle timestamp
+        if self.last_signal_candle_time == current_candle_time:
+            self.logger.info(f"[SCAN_SIGNAL] Already processed signal for candle at {current_candle_time}, skipping duplicate")
+            return
+        
         if prev_spot["EMA5"] <= prev_spot["EMA20"] and last_spot["EMA5"] > last_spot["EMA20"]:
             signal_side = "CE"
+            self.last_signal_candle_time = current_candle_time  # Mark this candle as processed
             self.logger.info(f"[SCAN_SIGNAL] 🔵 BULLISH EMA CROSSOVER DETECTED! EMA5 crossed above EMA20 - Signal: {signal_side}")
             
             # Send Telegram alert for bullish crossover
@@ -420,6 +435,7 @@ class TradingEngine:
                 self.logger.error(f"[TELEGRAM] Failed to send bullish crossover alert: {e}")
         elif prev_spot["EMA5"] >= prev_spot["EMA20"] and last_spot["EMA5"] < last_spot["EMA20"]:
             signal_side = "PE"
+            self.last_signal_candle_time = current_candle_time  # Mark this candle as processed
             self.logger.info(f"[SCAN_SIGNAL] 🔴 BEARISH EMA CROSSOVER DETECTED! EMA5 crossed below EMA20 - Signal: {signal_side}")
             
             # Send Telegram alert for bearish crossover

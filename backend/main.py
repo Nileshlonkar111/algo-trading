@@ -392,10 +392,12 @@ async def trading_loop():
                 # Check if we're at a 5-minute candle close boundary
                 current_time = dt.datetime.now()
                 current_minute = current_time.minute
+                current_second = current_time.second
                 
-                # Scan only at 5-minute intervals: X:00, X:05, X:10, X:15, X:20, X:25, X:30, X:35, X:40, X:45, X:50, X:55
+                # Scan only at 5-minute intervals AFTER 10 seconds delay to allow API to process completed candle
+                # Trigger at X:00:10, X:05:10, X:10:10, etc. (10 seconds after candle close)
                 # AND only if we haven't already scanned in this 5-minute window
-                if (current_minute % 5 == 0) and (current_minute != last_scan_minute):
+                if (current_minute % 5 == 0) and (current_second >= 10) and (current_minute != last_scan_minute):
                     logger.info(f"[TRADING_LOOP] 5-minute candle close detected at {current_time.strftime('%H:%M:%S')}, initiating scan...")
                     trading_engine.scan_and_maybe_enter_once()
                     last_scan_minute = current_minute
