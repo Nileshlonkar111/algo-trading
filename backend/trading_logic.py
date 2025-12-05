@@ -126,86 +126,8 @@ class TradingLogic:
         if "datetime" in df.columns:
             df["datetime"] = pd.to_datetime(df["datetime"])
         
-        # During market hours (9:15-15:30), inject current live candle
-        market_start = now.replace(hour=9, minute=15, second=0, microsecond=0)
-        market_end = now.replace(hour=15, minute=30, second=0, microsecond=0)
-        
-        is_market_hours = market_start <= now <= market_end
-        TradingLogic.logger.info(f"[FETCH_SPOT] Current time: {now.strftime('%H:%M:%S IST')}, Market hours: {is_market_hours}")
-        
-        if is_market_hours and not df.empty:
-            try:
-                TradingLogic.logger.info(f"[LIVE_DATA] Market hours detected, fetching live quote for token {nifty_token}...")
-                
-                # Get live quote - use proper format for Kite API
-                # For NSE:NIFTY 50, token is 256265
-                quote = self.kite.quote([f"NSE:NIFTY 50"])
-                
-                if quote:
-                    # Extract data - handle both token and symbol key formats
-                    quote_data = None
-                    if f"NSE:NIFTY 50" in quote:
-                        quote_data = quote[f"NSE:NIFTY 50"]
-                    elif nifty_token in quote:
-                        quote_data = quote[nifty_token]
-                    
-                    if quote_data:
-                        ohlc = quote_data['ohlc']
-                        last_price = quote_data['last_price']
-                        
-                        TradingLogic.logger.info(f"[LIVE_DATA] Got quote - Open:{ohlc['open']:.2f}, High:{ohlc['high']:.2f}, Low:{ohlc['low']:.2f}, Last:{last_price:.2f}")
-                        
-                        # Calculate current 5-min candle start time
-                        minutes_since_market_open = (now - market_start).total_seconds() / 60
-                        candle_number = int(minutes_since_market_open // 5)
-                        current_candle_start = market_start + timedelta(minutes=candle_number * 5)
-                        # Convert to naive datetime for comparison
-                        current_candle_start_naive = current_candle_start.replace(tzinfo=None)
-                        
-                        # Create live candle row
-                        live_candle = {
-                            'datetime': current_candle_start_naive,
-                            'open': ohlc['open'],
-                            'high': ohlc['high'],
-                            'low': ohlc['low'],
-                            'close': last_price,
-                            'volume': quote_data.get('volume', 0)
-                        }
-                        
-                        # Check if this candle already exists in historical data
-                        last_hist_time = df['datetime'].iloc[-1]
-                        # Convert timezone-aware datetime to naive for comparison
-                        if hasattr(last_hist_time, 'tz') and last_hist_time.tz is not None:
-                            last_hist_time = last_hist_time.replace(tzinfo=None)
-                        elif hasattr(last_hist_time, 'tz_localize'):
-                            last_hist_time = last_hist_time.tz_localize(None)
-                        
-                        TradingLogic.logger.info(f"[LIVE_DATA] Last historical candle: {last_hist_time.strftime('%Y-%m-%d %H:%M')}, Current candle start: {current_candle_start_naive.strftime('%Y-%m-%d %H:%M')}")
-                        
-                        if last_hist_time >= current_candle_start_naive:
-                            # Update existing incomplete candle with live data
-                            df.iloc[-1, df.columns.get_loc('open')] = live_candle['open']
-                            df.iloc[-1, df.columns.get_loc('high')] = live_candle['high']
-                            df.iloc[-1, df.columns.get_loc('low')] = live_candle['low']
-                            df.iloc[-1, df.columns.get_loc('close')] = live_candle['close']
-                            df.iloc[-1, df.columns.get_loc('volume')] = live_candle['volume']
-                            TradingLogic.logger.info(f"[LIVE_DATA] ✅ Updated incomplete candle at {current_candle_start_naive.strftime('%Y-%m-%d %H:%M')} with live price {last_price:.2f}")
-                        else:
-                            # Append new live candle (for gap between last historical and current)
-                            df = pd.concat([df, pd.DataFrame([live_candle])], ignore_index=True)
-                            TradingLogic.logger.info(f"[LIVE_DATA] ✅ Injected new live candle at {current_candle_start_naive.strftime('%Y-%m-%d %H:%M')} with price {last_price:.2f}")
-                    else:
-                        TradingLogic.logger.warning(f"[LIVE_DATA] Quote data not found in response keys: {list(quote.keys())}")
-                        
-            except Exception as e:
-                TradingLogic.logger.warning(f"[LIVE_DATA] ⚠️ Failed to inject live candle: {e}")
-                import traceback
-                TradingLogic.logger.debug(f"[LIVE_DATA] Traceback: {traceback.format_exc()}")
-                # Continue with historical data only
-        elif is_market_hours and df.empty:
-            TradingLogic.logger.warning(f"[LIVE_DATA] ⚠️ Market hours but no historical data available from API")
-        elif not is_market_hours:
-            TradingLogic.logger.info(f"[LIVE_DATA] Outside market hours, using historical data only")
+        # Note: Live candle injection removed - 3-second scan delay ensures API has processed completed candle
+        TradingLogic.logger.debug(f"[FETCH_SPOT] Using historical data from API (scan delay ensures freshness)")
         
         return df
     

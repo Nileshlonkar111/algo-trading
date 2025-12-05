@@ -459,22 +459,7 @@ class TradingEngine:
             self.logger.info("[SCAN] No EMA crossover signal this candle")
             return
 
-        # ATR filter with configurable threshold
-        # The atr_filter parameter allows trades when current ATR is at least (atr_filter * median_atr)
-        # Default: 0.8 means current ATR must be at least 80% of median ATR
-        atr_median = spot_df["ATR"].rolling(20).median().iloc[-1]
-        atr_filter_threshold = self.config.get("atr_filter", 0.8)
-        atr_threshold = atr_median * atr_filter_threshold
-        
-        self.logger.info(f"[SCAN_ATR] Current ATR: {last_spot['ATR']:.2f}, 20-period Median: {atr_median:.2f}, Threshold ({atr_filter_threshold*100:.0f}% of median): {atr_threshold:.2f}")
-        
-        if pd.isna(atr_median) or last_spot["ATR"] < atr_threshold:
-            self.logger.info(f"[SCAN_ATR] ❌ Market too quiet - ATR ({last_spot['ATR']:.2f}) below threshold ({atr_threshold:.2f}), skipping entry")
-            return
-        
-        self.logger.info(f"[SCAN_ATR] ✅ ATR filter passed - Market volatile enough (ATR {last_spot['ATR']:.2f} >= {atr_threshold:.2f})")
-
-        # Get spot LTP and identify ATM option
+        # Get spot LTP and identify ATM option for trade planning
         try:
             spot_ltp_data = self.kite.ltp(nifty_token)
             spot_ltp = list(spot_ltp_data.values())[0]["last_price"]
@@ -498,6 +483,45 @@ class TradingEngine:
             return
         
         self.logger.info(f"[SCAN_OPTION] ✅ Option identified: {tsym}")
+        
+        # Get option LTP and calculate planned SL/Target (shown even if filters fail)
+        try:
+            ltp_info = self.kite.ltp(f"NFO:{tsym}")
+            entry_ltp = list(ltp_info.values())[0]["last_price"]
+            atr_value = spot_df["ATR"].iloc[-1]
+            
+            # Calculate planned SL and Target
+            is_call = signal_side == "CE"
+            is_put = signal_side == "PE"
+            if is_call:
+                planned_sl = entry_ltp - atr_value
+                planned_target = entry_ltp + atr_value
+            elif is_put:
+                planned_sl = entry_ltp + atr_value
+                planned_target = entry_ltp - atr_value
+            else:
+                planned_sl = entry_ltp - atr_value
+                planned_target = entry_ltp + atr_value
+            
+            self.logger.info(f"[SCAN_PLAN] 📊 Trade Plan: {tsym} @ ₹{entry_ltp:.2f} | SL: ₹{planned_sl:.2f} | Target: ₹{planned_target:.2f} | ATR: {atr_value:.2f}")
+        except Exception as e:
+            self.logger.warning(f"[SCAN_PLAN] Could not fetch option LTP for planning: {e}")
+            entry_ltp = None
+        
+        # ATR filter with configurable threshold
+        # The atr_filter parameter allows trades when current ATR is at least (atr_filter * median_atr)
+        # Default: 0.8 means current ATR must be at least 80% of median ATR
+        atr_median = spot_df["ATR"].rolling(20).median().iloc[-1]
+        atr_filter_threshold = self.config.get("atr_filter", 0.8)
+        atr_threshold = atr_median * atr_filter_threshold
+        
+        self.logger.info(f"[SCAN_ATR] Current ATR: {last_spot['ATR']:.2f}, 20-period Median: {atr_median:.2f}, Threshold ({atr_filter_threshold*100:.0f}% of median): {atr_threshold:.2f}")
+        
+        if pd.isna(atr_median) or last_spot["ATR"] < atr_threshold:
+            self.logger.info(f"[SCAN_ATR] ❌ Market too quiet - ATR ({last_spot['ATR']:.2f}) below threshold ({atr_threshold:.2f}), skipping entry")
+            return
+        
+        self.logger.info(f"[SCAN_ATR] ✅ ATR filter passed - Market volatile enough (ATR {last_spot['ATR']:.2f} >= {atr_threshold:.2f})")
 
         # VWAP filter on NIFTY FUT
         try:
@@ -547,20 +571,21 @@ class TradingEngine:
         
         self.logger.info(f"[SCAN_COOLDOWN] ✅ No position conflicts or cooldowns")
 
-        # Get entry LTP
-        try:
-            ltp_info = self.kite.ltp(f"NFO:{tsym}")
-            entry_ltp = list(ltp_info.values())[0]["last_price"]
-        except Exception as e:
-            self.logger.error(f"[ERROR] Option LTP failed: {e}", exc_info=True)
-            if self.notify:
-                try:
-                    self.notify("error", {"error": str(e), "type": "option_ltp"})
-                except Exception as notify_error:
-                    self.logger.error(f"[NOTIFY] Failed to send error notification: {notify_error}")
-            return
+        # Reconfirm entry LTP before placing order (if not already fetched)
+        if entry_ltp is None:
+            try:
+                ltp_info = self.kite.ltp(f"NFO:{tsym}")
+                entry_ltp = list(ltp_info.values())[0]["last_price"]
+            except Exception as e:
+                self.logger.error(f"[ERROR] Option LTP failed: {e}", exc_info=True)
+                if self.notify:
+                    try:
+                        self.notify("error", {"error": str(e), "type": "option_ltp"})
+                    except Exception as notify_error:
+                        self.logger.error(f"[NOTIFY] Failed to send error notification: {notify_error}")
+                return
 
-        self.logger.info(f"[SCAN_ENTRY] 🎯 ALL FILTERS PASSED! Preparing to enter {tsym} at {entry_ltp:.2f}")
+        self.logger.info(f"[SCAN_ENTRY] 🎯 ALL FILTERS PASSED! Executing entry for {tsym} at ₹{entry_ltp:.2f}")
         self.log_trade(tsym, "BUY", entry_ltp, status="PLANNED", note="signal (spot EMA + FUT VWAP)")
         atr_value = spot_df["ATR"].iloc[-1]
         lot_qty = self.config.get("lot_qty", 75)
