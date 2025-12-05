@@ -89,6 +89,7 @@ class TradingEngine:
             "daily_max_profit": 0.04,
             "max_concurrent_pos": 3,
             "atr_period": 14,
+            "atr_filter": 0.8,  # ATR threshold multiplier (default: 0.8 = 80% of median ATR)
             "trail_start_pct": 0.15,
             "trail_giveback_pct": 0.10
         }
@@ -458,15 +459,20 @@ class TradingEngine:
             self.logger.info("[SCAN] No EMA crossover signal this candle")
             return
 
-        # ATR filter
+        # ATR filter with configurable threshold
+        # The atr_filter parameter allows trades when current ATR is at least (atr_filter * median_atr)
+        # Default: 0.8 means current ATR must be at least 80% of median ATR
         atr_median = spot_df["ATR"].rolling(20).median().iloc[-1]
-        self.logger.info(f"[SCAN_ATR] Current ATR: {last_spot['ATR']:.2f}, 20-period Median: {atr_median:.2f}")
+        atr_filter_threshold = self.config.get("atr_filter", 0.8)
+        atr_threshold = atr_median * atr_filter_threshold
         
-        if pd.isna(atr_median) or last_spot["ATR"] < atr_median:
-            self.logger.info(f"[SCAN_ATR] ❌ Market too quiet - ATR below median, skipping entry")
+        self.logger.info(f"[SCAN_ATR] Current ATR: {last_spot['ATR']:.2f}, 20-period Median: {atr_median:.2f}, Threshold ({atr_filter_threshold*100:.0f}% of median): {atr_threshold:.2f}")
+        
+        if pd.isna(atr_median) or last_spot["ATR"] < atr_threshold:
+            self.logger.info(f"[SCAN_ATR] ❌ Market too quiet - ATR ({last_spot['ATR']:.2f}) below threshold ({atr_threshold:.2f}), skipping entry")
             return
         
-        self.logger.info(f"[SCAN_ATR] ✅ ATR filter passed - Market volatile enough")
+        self.logger.info(f"[SCAN_ATR] ✅ ATR filter passed - Market volatile enough (ATR {last_spot['ATR']:.2f} >= {atr_threshold:.2f})")
 
         # Get spot LTP and identify ATM option
         try:
