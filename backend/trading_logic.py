@@ -148,69 +148,6 @@ class TradingLogic:
             TradingLogic.logger.error("[ERR] fetch_fut_5m: %s", e)
             return None
     
-    def inject_live_candle(self, df, trading_symbol):
-        """Inject live candle data during market hours for any instrument"""
-        if df is None or df.empty:
-            return df
-        
-        # Use IST timezone
-        now = dt.datetime.now(self.timezone)
-        market_start = now.replace(hour=9, minute=15, second=0, microsecond=0)
-        market_end = now.replace(hour=15, minute=30, second=0, microsecond=0)
-        
-        if not (market_start <= now <= market_end):
-            return df
-        
-        try:
-            TradingLogic.logger.info(f"[LIVE_DATA] Market hours detected, fetching live quote for {trading_symbol}...")
-            
-            # Get live quote
-            quote = self.kite.quote([trading_symbol])
-            
-            if quote and trading_symbol in quote:
-                quote_data = quote[trading_symbol]
-                ohlc = quote_data['ohlc']
-                last_price = quote_data['last_price']
-                
-                TradingLogic.logger.info(f"[LIVE_DATA] Got quote for {trading_symbol} - Open:{ohlc['open']:.2f}, High:{ohlc['high']:.2f}, Low:{ohlc['low']:.2f}, Last:{last_price:.2f}")
-                
-                # Calculate current 5-min candle start time
-                minutes_since_market_open = (now - market_start).total_seconds() / 60
-                candle_number = int(minutes_since_market_open // 5)
-                current_candle_start = market_start + timedelta(minutes=candle_number * 5)
-                
-                # Create live candle row
-                live_candle = {
-                    'datetime': current_candle_start,
-                    'open': ohlc['open'],
-                    'high': ohlc['high'],
-                    'low': ohlc['low'],
-                    'close': last_price,
-                    'volume': quote_data.get('volume', 0)
-                }
-                
-                # Check if this candle already exists in historical data
-                last_hist_time = df['datetime'].iloc[-1]
-                if hasattr(last_hist_time, 'tz_localize'):
-                    last_hist_time = last_hist_time.tz_localize(None)
-                
-                if last_hist_time >= current_candle_start:
-                    # Update existing candle with live data
-                    df.iloc[-1] = live_candle
-                    TradingLogic.logger.info(f"[LIVE_DATA] ✅ Updated incomplete candle at {current_candle_start.strftime('%H:%M')} with live price {last_price:.2f}")
-                else:
-                    # Append new live candle
-                    df = pd.concat([df, pd.DataFrame([live_candle])], ignore_index=True)
-                    TradingLogic.logger.info(f"[LIVE_DATA] ✅ Injected new live candle at {current_candle_start.strftime('%H:%M')} with price {last_price:.2f}")
-            else:
-                TradingLogic.logger.warning(f"[LIVE_DATA] Quote data not found for {trading_symbol} in response keys: {list(quote.keys()) if quote else 'None'}")
-                
-        except Exception as e:
-            TradingLogic.logger.warning(f"[LIVE_DATA] ⚠️ Failed to inject live candle for {trading_symbol}: {e}")
-            import traceback
-            TradingLogic.logger.debug(f"[LIVE_DATA] Traceback: {traceback.format_exc()}")
-        
-        return df
     
     def compute_vwap(self, df):
         """Compute VWAP using typical price."""

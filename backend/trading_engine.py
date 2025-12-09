@@ -51,6 +51,10 @@ class TradingEngine:
         self.session_summary_sent = False
         self.last_signal_candle_time = None  # Track last processed signal candle to prevent duplicates
         
+        # Store previous cycle's EMA values for accurate crossover detection
+        self.prev_ema5 = None
+        self.prev_ema20 = None
+        
         # Configure logging to ensure output to stdout
         self.logger.setLevel(logging.DEBUG)
         if not self.logger.handlers:
@@ -182,15 +186,10 @@ class TradingEngine:
         is_call = symbol.endswith("CE")
         is_put = symbol.endswith("PE")
 
-        if is_call:
-            sl_price = entry_price - atr
-            target_price = entry_price + atr
-        elif is_put:
-            sl_price = entry_price + atr
-            target_price = entry_price - atr
-        else:
-            sl_price = entry_price - atr
-            target_price = entry_price + atr
+        # When BUYING options (both CE and PE), you profit when premium INCREASES
+        # SL is below entry, Target is above entry (same for both CE and PE)
+        sl_price = entry_price - atr
+        target_price = entry_price + atr
 
         self.positions[symbol] = {
             "entry_price": entry_price,
@@ -394,12 +393,27 @@ class TradingEngine:
             return
 
         last_spot = spot_df.iloc[-1]
-        prev_spot = spot_df.iloc[-2]
+        current_ema5 = last_spot['EMA5']
+        current_ema20 = last_spot['EMA20']
         
         # Log last 3 candles for debugging
         self.logger.info(f"[SCAN_DATA] Last 3 candles close prices: {spot_df['close'].iloc[-3]:.2f}, {spot_df['close'].iloc[-2]:.2f}, {spot_df['close'].iloc[-1]:.2f}")
-        self.logger.info(f"[SCAN_EMA] Previous: EMA5={prev_spot['EMA5']:.2f}, EMA20={prev_spot['EMA20']:.2f}")
-        self.logger.info(f"[SCAN_EMA] Current:  EMA5={last_spot['EMA5']:.2f}, EMA20={last_spot['EMA20']:.2f}")
+        
+        # Use stored previous EMA values from last cycle for accurate crossover detection
+        if self.prev_ema5 is not None and self.prev_ema20 is not None:
+            self.logger.info(f"[SCAN_EMA] Previous (from last cycle): EMA5={self.prev_ema5:.2f}, EMA20={self.prev_ema20:.2f}, Position={'ABOVE' if self.prev_ema5 > self.prev_ema20 else 'BELOW'}")
+        else:
+            # First cycle - use second-to-last candle as previous
+            prev_spot = spot_df.iloc[-2]
+            self.prev_ema5 = prev_spot['EMA5']
+            self.prev_ema20 = prev_spot['EMA20']
+            self.logger.info(f"[SCAN_EMA] Previous (FIRST RUN - initialized from iloc[-2]): EMA5={self.prev_ema5:.2f}, EMA20={self.prev_ema20:.2f}, Position={'ABOVE' if self.prev_ema5 > self.prev_ema20 else 'BELOW'}")
+        
+        self.logger.info(f"[SCAN_EMA] Current  (this cycle):       EMA5={current_ema5:.2f}, EMA20={current_ema20:.2f}, Position={'ABOVE' if current_ema5 > current_ema20 else 'BELOW'}")
+        
+        # Show what iloc[-2] would have given (for comparison with old buggy behavior)
+        prev_spot_debug = spot_df.iloc[-2]
+        self.logger.info(f"[SCAN_EMA] DEBUG: iloc[-2] would show: EMA5={prev_spot_debug['EMA5']:.2f}, EMA20={prev_spot_debug['EMA20']:.2f} (OLD BUGGY METHOD)")
 
         # EMA crossover signal with duplicate detection
         signal_side = None
@@ -414,9 +428,13 @@ class TradingEngine:
         # Check if we already processed a signal for this candle timestamp
         if self.last_signal_candle_time == current_candle_time:
             self.logger.info(f"[SCAN_SIGNAL] Already processed signal for candle at {current_candle_time}, skipping duplicate")
+            # Update stored EMA values even if skipping duplicate
+            self.prev_ema5 = current_ema5
+            self.prev_ema20 = current_ema20
             return
         
-        if prev_spot["EMA5"] <= prev_spot["EMA20"] and last_spot["EMA5"] > last_spot["EMA20"]:
+        # Detect crossover using stored previous values vs current values
+        if self.prev_ema5 <= self.prev_ema20 and current_ema5 > current_ema20:
             signal_side = "CE"
             self.last_signal_candle_time = current_candle_time  # Mark this candle as processed
             self.logger.info(f"[SCAN_SIGNAL] 🔵 BULLISH EMA CROSSOVER DETECTED! EMA5 crossed above EMA20 - Signal: {signal_side}")
@@ -427,14 +445,14 @@ class TradingEngine:
                 atm = self.logic.round_to_50(spot_ltp)
                 self.telegram.send_ema_crossover_alert(
                     signal_side=signal_side,
-                    ema5=last_spot["EMA5"],
-                    ema20=last_spot["EMA20"],
+                    ema5=current_ema5,
+                    ema20=current_ema20,
                     spot_ltp=spot_ltp,
                     atm=atm
                 )
             except Exception as e:
                 self.logger.error(f"[TELEGRAM] Failed to send bullish crossover alert: {e}")
-        elif prev_spot["EMA5"] >= prev_spot["EMA20"] and last_spot["EMA5"] < last_spot["EMA20"]:
+        elif self.prev_ema5 >= self.prev_ema20 and current_ema5 < current_ema20:
             signal_side = "PE"
             self.last_signal_candle_time = current_candle_time  # Mark this candle as processed
             self.logger.info(f"[SCAN_SIGNAL] 🔴 BEARISH EMA CROSSOVER DETECTED! EMA5 crossed below EMA20 - Signal: {signal_side}")
@@ -445,16 +463,21 @@ class TradingEngine:
                 atm = self.logic.round_to_50(spot_ltp)
                 self.telegram.send_ema_crossover_alert(
                     signal_side=signal_side,
-                    ema5=last_spot["EMA5"],
-                    ema20=last_spot["EMA20"],
+                    ema5=current_ema5,
+                    ema20=current_ema20,
                     spot_ltp=spot_ltp,
                     atm=atm
                 )
             except Exception as e:
                 self.logger.error(f"[TELEGRAM] Failed to send bearish crossover alert: {e}")
         else:
-            self.logger.info(f"[SCAN_EMA] No crossover - EMA5 {'above' if last_spot['EMA5'] > last_spot['EMA20'] else 'below'} EMA20 (diff: {abs(last_spot['EMA5'] - last_spot['EMA20']):.2f})")
+            self.logger.info(f"[SCAN_EMA] No crossover - EMA5 {'above' if current_ema5 > current_ema20 else 'below'} EMA20 (diff: {abs(current_ema5 - current_ema20):.2f})")
 
+        # Store current EMA values for next cycle (CRITICAL: these will be "Previous" in next scan)
+        self.logger.info(f"[SCAN_EMA] Storing for next cycle: EMA5={current_ema5:.2f}, EMA20={current_ema20:.2f}")
+        self.prev_ema5 = current_ema5
+        self.prev_ema20 = current_ema20
+        
         if not signal_side:
             self.logger.info("[SCAN] No EMA crossover signal this candle")
             return
@@ -493,15 +516,10 @@ class TradingEngine:
             # Calculate planned SL and Target
             is_call = signal_side == "CE"
             is_put = signal_side == "PE"
-            if is_call:
-                planned_sl = entry_ltp - atr_value
-                planned_target = entry_ltp + atr_value
-            elif is_put:
-                planned_sl = entry_ltp + atr_value
-                planned_target = entry_ltp - atr_value
-            else:
-                planned_sl = entry_ltp - atr_value
-                planned_target = entry_ltp + atr_value
+            # When BUYING options (both CE and PE), you profit when premium INCREASES
+            # SL is below entry, Target is above entry (same for both CE and PE)
+            planned_sl = entry_ltp - atr_value
+            planned_target = entry_ltp + atr_value
             
             self.logger.info(f"[SCAN_PLAN] 📊 Trade Plan: {tsym} @ ₹{entry_ltp:.2f} | SL: ₹{planned_sl:.2f} | Target: ₹{planned_target:.2f} | ATR: {atr_value:.2f}")
         except Exception as e:
@@ -535,8 +553,7 @@ class TradingEngine:
                 self.logger.warning(f"[SCAN] Not enough FUT candles: {len(fut_df) if fut_df is not None else 0}/10")
                 return
             
-            # Inject live candle for futures
-            fut_df = self.logic.inject_live_candle(fut_df, f"NFO:{fut_symbol}")
+            # Note: Live candle injection removed - 3-second scan delay ensures API has processed completed candle
             fut_df = self.logic.compute_vwap(fut_df)
             fut_last = fut_df.iloc[-1]
             vwap_direction_ok = (signal_side == "CE" and fut_last["close"] > fut_last["VWAP"]) or \
@@ -689,16 +706,19 @@ class TradingEngine:
             is_put = pos.get("is_put", False)
 
             # Activate trailing
+            # When BUYING options (CE or PE), both profit when premium increases
             if not pos["trailing_active"]:
-                trigger_price = entry_price * (1 + trail_start_pct) if is_call else entry_price * (1 - trail_start_pct)
-                min_sl = entry_price * 0.995 if is_call else entry_price * 1.005
-                if (is_call and ltp >= trigger_price) or (is_put and ltp <= trigger_price):
-                    pos["sl_price"] = max(min_sl, entry_price) if is_call else min(min_sl, entry_price)
+                trigger_price = entry_price * (1 + trail_start_pct)
+                min_sl = entry_price * 0.995
+                if ltp >= trigger_price:
+                    pos["sl_price"] = max(min_sl, entry_price)
                     pos["trailing_active"] = True
                     self.logger.info(f"[TRAILING] Activated for {symbol}, new SL: {pos['sl_price']:.2f}")
 
             # Dynamic ATR-based SL/TGT
-            if is_call:
+            # When BUYING options (both CE and PE), profit when premium increases
+            # So both should have SL below current price and Target above current price
+            if is_call or is_put:
                 dynamic_sl = ltp - atr
                 dynamic_target = ltp + atr
                 if dynamic_sl > pos["sl_price"]:
@@ -709,36 +729,20 @@ class TradingEngine:
                     old_tgt = pos["target_price"]
                     pos["target_price"] = dynamic_target
                     self.logger.info(f"[DYNAMIC_TARGET] {symbol}: {old_tgt:.2f} -> {pos['target_price']:.2f}")
-            elif is_put:
-                dynamic_sl = ltp + atr
-                dynamic_target = ltp - atr
-                if dynamic_sl < pos["sl_price"] or pos["sl_price"] == entry_price + atr:
-                    old_sl = pos["sl_price"]
-                    pos["sl_price"] = dynamic_sl
-                    self.logger.info(f"[DYNAMIC_SL] {symbol}: {old_sl:.2f} -> {pos['sl_price']:.2f}")
-                if dynamic_target < pos["target_price"]:
-                    old_tgt = pos["target_price"]
-                    pos["target_price"] = dynamic_target
-                    self.logger.info(f"[DYNAMIC_TARGET] {symbol}: {old_tgt:.2f} -> {pos['target_price']:.2f}")
 
             # Trailing giveback adjustments
+            # When BUYING options (CE or PE), trail SL upward as premium increases
             if pos["trailing_active"]:
-                if is_call:
-                    proposed_sl = ltp * (1 - trail_giveback_pct)
-                    if proposed_sl > pos["sl_price"]:
-                        old_sl = pos["sl_price"]
-                        pos["sl_price"] = proposed_sl
-                        self.logger.info(f"[TRAILING_UPDATE] {symbol} SL raised: {old_sl:.2f} -> {pos['sl_price']:.2f}")
-                elif is_put:
-                    proposed_sl = ltp * (1 + trail_giveback_pct)
-                    if proposed_sl < pos["sl_price"]:
-                        old_sl = pos["sl_price"]
-                        pos["sl_price"] = proposed_sl
-                        self.logger.info(f"[TRAILING_UPDATE] {symbol} SL lowered: {old_sl:.2f} -> {pos['sl_price']:.2f}")
+                proposed_sl = ltp * (1 - trail_giveback_pct)
+                if proposed_sl > pos["sl_price"]:
+                    old_sl = pos["sl_price"]
+                    pos["sl_price"] = proposed_sl
+                    self.logger.info(f"[TRAILING_UPDATE] {symbol} SL raised: {old_sl:.2f} -> {pos['sl_price']:.2f}")
 
             # Check SL/TGT/EOD
-            hit_sl = (ltp <= pos["sl_price"] if is_call else ltp >= pos["sl_price"])
-            hit_tgt = (ltp >= pos["target_price"] if is_call else ltp <= pos["target_price"])
+            # When BUYING options (CE or PE), both profit when premium increases
+            hit_sl = ltp <= pos["sl_price"]  # Exit if premium drops to SL
+            hit_tgt = ltp >= pos["target_price"]  # Exit if premium rises to target
             time_exit = nowt >= eod_squareoff
             
             # Log current position status every check
@@ -754,7 +758,7 @@ class TradingEngine:
                         variety=self.kite.VARIETY_REGULAR,
                         exchange=self.kite.EXCHANGE_NFO,
                         tradingsymbol=symbol,
-                        transaction_type=self.kite.TRANSACTION_TYPE_SELL if is_call else self.kite.TRANSACTION_TYPE_BUY,
+                        transaction_type=self.kite.TRANSACTION_TYPE_SELL,  # Always SELL when closing bought options
                         quantity=pos["quantity"],
                         order_type=self.kite.ORDER_TYPE_MARKET,
                         product=self.kite.PRODUCT_MIS
