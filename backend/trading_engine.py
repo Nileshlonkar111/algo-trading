@@ -54,6 +54,7 @@ class TradingEngine:
         # Store previous cycle's EMA values for accurate crossover detection
         self.prev_ema5 = None
         self.prev_ema20 = None
+        self.last_reset_date = None  # Track last daily reset
         
         # Configure logging to ensure output to stdout
         self.logger.setLevel(logging.DEBUG)
@@ -283,6 +284,16 @@ class TradingEngine:
         now_dt = dt.datetime.now(self.timezone)
         nowt = now_dt.time()
         
+        # Reset EMA state at start of new trading day to prevent stale values from previous day
+        current_date = now_dt.date()
+        if self.last_reset_date != current_date:
+            self.logger.info(f"[DAILY_RESET] New trading day detected ({current_date}), resetting EMA state")
+            self.prev_ema5 = None
+            self.prev_ema20 = None
+            self.last_signal_candle_time = None
+            self.last_reset_date = current_date
+            self.logger.info("[DAILY_RESET] ✅ EMA state reset complete - fresh start for new day")
+        
         self.logger.info(f"[SCAN_START] ========== Scan cycle at {now_dt.strftime('%H:%M:%S')} (5-min candle closed) ==========")
         
         if self._shutdown_requested:
@@ -392,22 +403,41 @@ class TradingEngine:
             self.logger.info(f"[SCAN] Not enough spot candles: {len(spot_df) if spot_df is not None else 0}/10")
             return
 
-        last_spot = spot_df.iloc[-1]
+        # Filter to only TODAY's candles for EMA crossover detection
+        # EMAs are calculated on full historical data, but we only look at today's values
+        today_date = now_dt.date()
+        spot_df_today = spot_df[spot_df['datetime'].dt.date == today_date].copy()
+        
+        if len(spot_df_today) < 2:
+            self.logger.info(f"[SCAN] Not enough TODAY's candles for crossover: {len(spot_df_today)}/2 (have {len(spot_df)} total including history)")
+            return
+        
+        self.logger.info(f"[SCAN_DATA] Using {len(spot_df_today)} candles from today (out of {len(spot_df)} total with history)")
+        
+        last_spot = spot_df_today.iloc[-1]
         current_ema5 = last_spot['EMA5']
         current_ema20 = last_spot['EMA20']
         
-        # Log last 3 candles for debugging
-        self.logger.info(f"[SCAN_DATA] Last 3 candles close prices: {spot_df['close'].iloc[-3]:.2f}, {spot_df['close'].iloc[-2]:.2f}, {spot_df['close'].iloc[-1]:.2f}")
+        # Log last 3 candles for debugging (from today only)
+        if len(spot_df_today) >= 3:
+            self.logger.info(f"[SCAN_DATA] Last 3 TODAY's candles close prices: {spot_df_today['close'].iloc[-3]:.2f}, {spot_df_today['close'].iloc[-2]:.2f}, {spot_df_today['close'].iloc[-1]:.2f}")
+        else:
+            self.logger.info(f"[SCAN_DATA] Latest TODAY's candle close price: {spot_df_today['close'].iloc[-1]:.2f}")
         
         # Use stored previous EMA values from last cycle for accurate crossover detection
         if self.prev_ema5 is not None and self.prev_ema20 is not None:
             self.logger.info(f"[SCAN_EMA] Previous (from last cycle): EMA5={self.prev_ema5:.2f}, EMA20={self.prev_ema20:.2f}, Position={'ABOVE' if self.prev_ema5 > self.prev_ema20 else 'BELOW'}")
         else:
-            # First cycle - use second-to-last candle as previous
-            prev_spot = spot_df.iloc[-2]
-            self.prev_ema5 = prev_spot['EMA5']
-            self.prev_ema20 = prev_spot['EMA20']
-            self.logger.info(f"[SCAN_EMA] Previous (FIRST RUN - initialized from iloc[-2]): EMA5={self.prev_ema5:.2f}, EMA20={self.prev_ema20:.2f}, Position={'ABOVE' if self.prev_ema5 > self.prev_ema20 else 'BELOW'}")
+            # First cycle of the day - initialize with current values but don't detect crossover yet
+            # We need at least 2 scan cycles to detect a crossover
+            self.logger.info(f"[SCAN_EMA] FIRST SCAN CYCLE - Initializing EMA tracking (no crossover detection yet)")
+            self.logger.info(f"[SCAN_EMA] Current  (this cycle):       EMA5={current_ema5:.2f}, EMA20={current_ema20:.2f}, Position={'ABOVE' if current_ema5 > current_ema20 else 'BELOW'}")
+            # Store current values for next cycle
+            self.prev_ema5 = current_ema5
+            self.prev_ema20 = current_ema20
+            self.logger.info(f"[SCAN_EMA] Stored for next cycle: EMA5={current_ema5:.2f}, EMA20={current_ema20:.2f}")
+            self.logger.info("[SCAN] First cycle - skipping crossover detection, initializing baseline")
+            return
         
         self.logger.info(f"[SCAN_EMA] Current  (this cycle):       EMA5={current_ema5:.2f}, EMA20={current_ema20:.2f}, Position={'ABOVE' if current_ema5 > current_ema20 else 'BELOW'}")
         

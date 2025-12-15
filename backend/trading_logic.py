@@ -166,10 +166,36 @@ class TradingLogic:
     def add_spot_indicators(self, df, atr_period=14):
         if df is None or df.empty:
             return df
-        close = df["close"]
-        df["EMA5"] = close.ewm(span=5, adjust=False).mean()
-        df["EMA20"] = close.ewm(span=20, adjust=False).mean()
+        
+        # Calculate EMAs only on TODAY's data to match charting platforms
+        # This prevents yesterday's EMA values from affecting today's calculations
+        today = dt.datetime.now(self.timezone).date()
+        
+        # Keep full dataset for ATR calculation (needs historical data)
         df["ATR"] = self.calculate_atr(df, period=atr_period)
+        
+        # Filter to today's data for EMA calculation
+        today_mask = df["datetime"].dt.date == today
+        today_indices = df[today_mask].index
+        
+        if len(today_indices) > 0:
+            # Calculate EMAs only on today's data
+            today_close = df.loc[today_indices, "close"]
+            df.loc[today_indices, "EMA5"] = today_close.ewm(span=5, adjust=False).mean()
+            df.loc[today_indices, "EMA20"] = today_close.ewm(span=20, adjust=False).mean()
+            
+            # For historical data (yesterday), set EMAs to NaN
+            yesterday_mask = ~today_mask
+            df.loc[yesterday_mask, "EMA5"] = float('nan')
+            df.loc[yesterday_mask, "EMA20"] = float('nan')
+            
+            TradingLogic.logger.info(f"[INDICATORS] Calculated EMAs on {len(today_indices)} candles from today ({today})")
+        else:
+            # No today's data, set all EMAs to NaN
+            df["EMA5"] = float('nan')
+            df["EMA20"] = float('nan')
+            TradingLogic.logger.warning(f"[INDICATORS] No candles from today ({today}), EMAs set to NaN")
+        
         return df
     
     @retry_on_exception(retries=3, delay=2)
