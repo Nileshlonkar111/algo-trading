@@ -190,7 +190,7 @@ class TradingEngine:
         # When BUYING options (both CE and PE), you profit when premium INCREASES
         # SL is below entry, Target is above entry (same for both CE and PE)
         sl_price = entry_price - atr
-        target_price = entry_price + atr
+        target_price = entry_price + 2 * atr
 
         self.positions[symbol] = {
             "entry_price": entry_price,
