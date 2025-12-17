@@ -95,8 +95,8 @@ class TradingEngine:
             "max_concurrent_pos": 3,
             "atr_period": 14,
             "atr_filter": 0.8,  # ATR threshold multiplier (default: 0.8 = 80% of median ATR)
-            "trail_start_pct": 0.15,
-            "trail_giveback_pct": 0.10
+            "trail_start_pct": 0.20,
+            "trail_giveback_pct": 0.05
         }
         
         for key, default_value in defaults.items():
@@ -719,8 +719,8 @@ class TradingEngine:
                     self.logger.error(f"[NOTIFY] Failed to send error notification: {notify_error}")
             return
 
-        trail_start_pct = self.config.get("trail_start_pct", 0.15)
-        trail_giveback_pct = self.config.get("trail_giveback_pct", 0.10)
+        trail_start_pct = self.config.get("trail_start_pct", 0.20)
+        trail_giveback_pct = self.config.get("trail_giveback_pct", 0.05)
         eod_squareoff = dt.time(15, 20)
 
         for symbol, pos in list(self.positions.items()):
