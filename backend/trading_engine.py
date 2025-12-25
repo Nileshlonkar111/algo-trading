@@ -96,7 +96,8 @@ class TradingEngine:
             "atr_period": 14,
             "atr_filter": 0.8,  # ATR threshold multiplier (default: 0.8 = 80% of median ATR)
             "trail_start_pct": 0.20,
-            "trail_giveback_pct": 0.05
+            "trail_giveback_pct": 0.03,  # Reduced from 0.05 to 0.03 (3% instead of 5%)
+            "dynamic_atr_multiplier": 0.85  # Use 85% of ATR for tighter dynamic SL
         }
         
         for key, default_value in defaults.items():
@@ -190,7 +191,7 @@ class TradingEngine:
         # When BUYING options (both CE and PE), you profit when premium INCREASES
         # SL is below entry, Target is above entry (same for both CE and PE)
         sl_price = entry_price - atr
-        target_price = entry_price + 2 * atr
+        target_price = entry_price + 1.5 * atr  # Changed from 2x to 1.5x ATR for better hit rate
 
         self.positions[symbol] = {
             "entry_price": entry_price,
@@ -720,8 +721,8 @@ class TradingEngine:
             return
 
         trail_start_pct = self.config.get("trail_start_pct", 0.20)
-        trail_giveback_pct = self.config.get("trail_giveback_pct", 0.05)
-        eod_squareoff = dt.time(15, 20)
+        trail_giveback_pct = self.config.get("trail_giveback_pct", 0.03)
+        eod_squareoff = dt.time(15, 10)  # Exit earlier to avoid last-minute illiquidity
 
         for symbol, pos in list(self.positions.items()):
             if pos["status"] != "OPEN":
@@ -737,28 +738,29 @@ class TradingEngine:
 
             # Activate trailing
             # When BUYING options (CE or PE), both profit when premium increases
+            # FIX: Don't reset SL when trailing activates - keep the dynamic SL progress
             if not pos["trailing_active"]:
                 trigger_price = entry_price * (1 + trail_start_pct)
-                min_sl = entry_price * 0.995
                 if ltp >= trigger_price:
-                    pos["sl_price"] = max(min_sl, entry_price)
+                    # Don't modify SL - let dynamic ATR handle it
+                    # Just activate the trailing flag to enable giveback logic
                     pos["trailing_active"] = True
-                    self.logger.info(f"[TRAILING] Activated for {symbol}, new SL: {pos['sl_price']:.2f}")
+                    self.logger.info(f"[TRAILING] Activated for {symbol}, keeping dynamic SL: {pos['sl_price']:.2f}")
 
-            # Dynamic ATR-based SL/TGT
+            # Dynamic ATR-based SL (FIX: Use tighter multiplier, don't move target)
             # When BUYING options (both CE and PE), profit when premium increases
-            # So both should have SL below current price and Target above current price
+            # So SL should be below current price
             if is_call or is_put:
-                dynamic_sl = ltp - atr
-                dynamic_target = ltp + atr
+                atr_multiplier = self.config.get("dynamic_atr_multiplier", 0.85)
+                dynamic_sl = ltp - (atr * atr_multiplier)
+                
                 if dynamic_sl > pos["sl_price"]:
                     old_sl = pos["sl_price"]
                     pos["sl_price"] = dynamic_sl
                     self.logger.info(f"[DYNAMIC_SL] {symbol}: {old_sl:.2f} -> {pos['sl_price']:.2f}")
-                if dynamic_target > pos["target_price"]:
-                    old_tgt = pos["target_price"]
-                    pos["target_price"] = dynamic_target
-                    self.logger.info(f"[DYNAMIC_TARGET] {symbol}: {old_tgt:.2f} -> {pos['target_price']:.2f}")
+                
+                # REMOVED: Don't move target dynamically - creates moving goalpost
+                # Keep original target from entry time
 
             # Trailing giveback adjustments
             # When BUYING options (CE or PE), trail SL upward as premium increases
