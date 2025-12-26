@@ -97,7 +97,9 @@ class TradingEngine:
             "atr_filter": 0.8,  # ATR threshold multiplier (default: 0.8 = 80% of median ATR)
             "trail_start_pct": 0.20,
             "trail_giveback_pct": 0.03,  # Reduced from 0.05 to 0.03 (3% instead of 5%)
-            "dynamic_atr_multiplier": 0.85  # Use 85% of ATR for tighter dynamic SL
+            "dynamic_atr_multiplier": 0.85,  # Use 85% of ATR for tighter dynamic SL
+            "min_option_price": 150,  # Minimum acceptable option premium (helps avoid very cheap ATM options)
+            "max_option_price": 200   # Maximum acceptable option premium (to control risk per trade)
         }
         
         for key, default_value in defaults.items():
@@ -531,17 +533,25 @@ class TradingEngine:
         underlying = self.config.get("underlying_name", "NIFTY")
         self.logger.info(f"[SCAN_OPTION] Spot LTP: {spot_ltp:.2f}, ATM Strike: {atm}, Expiry: {expiry}, Side: {signal_side}")
         
-        tsym, token = self.logic.lookup_option(underlying, expiry, atm, signal_side)
-        if not tsym or not token:
-            self.logger.warning(f"[SCAN_OPTION] ❌ ATM option not found: {underlying} {expiry} {atm} {signal_side}")
+        # Use new option finder to get options in 150-200 price range
+        min_price = self.config.get("min_option_price", 150)
+        max_price = self.config.get("max_option_price", 200)
+        
+        self.logger.info(f"[SCAN_OPTION] Searching for option with premium between ₹{min_price}-₹{max_price}...")
+        tsym, token, entry_ltp, selected_strike = self.logic.find_option_in_price_range(
+            underlying, expiry, atm, signal_side, spot_ltp, min_price, max_price
+        )
+        
+        if not tsym or not token or entry_ltp is None:
+            self.logger.warning(f"[SCAN_OPTION] ❌ No suitable option found in price range ₹{min_price}-₹{max_price}")
             return
         
-        self.logger.info(f"[SCAN_OPTION] ✅ Option identified: {tsym}")
+        strike_distance = abs(selected_strike - atm)
+        position_type = "ATM" if strike_distance == 0 else f"ITM ({strike_distance} pts)"
+        self.logger.info(f"[SCAN_OPTION] ✅ Selected option: {tsym} @ ₹{entry_ltp:.2f} ({position_type})")
         
-        # Get option LTP and calculate planned SL/Target (shown even if filters fail)
+        # Calculate planned SL/Target with entry_ltp already available
         try:
-            ltp_info = self.kite.ltp(f"NFO:{tsym}")
-            entry_ltp = list(ltp_info.values())[0]["last_price"]
             atr_value = spot_df["ATR"].iloc[-1]
             
             # Calculate planned SL and Target
@@ -554,8 +564,7 @@ class TradingEngine:
             
             self.logger.info(f"[SCAN_PLAN] 📊 Trade Plan: {tsym} @ ₹{entry_ltp:.2f} | SL: ₹{planned_sl:.2f} | Target: ₹{planned_target:.2f} | ATR: {atr_value:.2f}")
         except Exception as e:
-            self.logger.warning(f"[SCAN_PLAN] Could not fetch option LTP for planning: {e}")
-            entry_ltp = None
+            self.logger.warning(f"[SCAN_PLAN] Could not calculate planned SL/Target: {e}")
         
         # ATR filter with configurable threshold
         # The atr_filter parameter allows trades when current ATR is at least (atr_filter * median_atr)
@@ -619,19 +628,19 @@ class TradingEngine:
         
         self.logger.info(f"[SCAN_COOLDOWN] ✅ No position conflicts or cooldowns")
 
-        # Reconfirm entry LTP before placing order (if not already fetched)
-        if entry_ltp is None:
-            try:
-                ltp_info = self.kite.ltp(f"NFO:{tsym}")
-                entry_ltp = list(ltp_info.values())[0]["last_price"]
-            except Exception as e:
-                self.logger.error(f"[ERROR] Option LTP failed: {e}", exc_info=True)
-                if self.notify:
-                    try:
-                        self.notify("error", {"error": str(e), "type": "option_ltp"})
-                    except Exception as notify_error:
-                        self.logger.error(f"[NOTIFY] Failed to send error notification: {notify_error}")
-                return
+        # entry_ltp is already fetched by find_option_in_price_range, but reconfirm before order
+        try:
+            ltp_info = self.kite.ltp(f"NFO:{tsym}")
+            entry_ltp = list(ltp_info.values())[0]["last_price"]
+            self.logger.info(f"[SCAN_ENTRY] Reconfirmed LTP: ₹{entry_ltp:.2f}")
+        except Exception as e:
+            self.logger.error(f"[ERROR] Failed to reconfirm option LTP: {e}", exc_info=True)
+            if self.notify:
+                try:
+                    self.notify("error", {"error": str(e), "type": "option_ltp"})
+                except Exception as notify_error:
+                    self.logger.error(f"[NOTIFY] Failed to send error notification: {notify_error}")
+            return
 
         self.logger.info(f"[SCAN_ENTRY] 🎯 ALL FILTERS PASSED! Executing entry for {tsym} at ₹{entry_ltp:.2f}")
         self.log_trade(tsym, "BUY", entry_ltp, status="PLANNED", note="signal (spot EMA + FUT VWAP)")

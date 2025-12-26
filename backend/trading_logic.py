@@ -96,6 +96,109 @@ class TradingLogic:
         self.load_instruments(force=True)
         return self._option_index.get(key, (None, None))
     
+    def find_option_in_price_range(self, symbol_name: str, expiry_date: dt.date, atm_strike: int,
+                                   option_type: str, spot_ltp: float,
+                                   min_price: float = 150, max_price: float = 200) -> Tuple[Optional[str], Optional[int], Optional[float], Optional[int]]:
+        """
+        Find an option with premium in the specified price range - OPTIMIZED for speed.
+        Uses batch LTP fetching to minimize API calls and execution time.
+        
+        Args:
+            symbol_name: Underlying name (e.g., "NIFTY")
+            expiry_date: Current expiry date
+            atm_strike: ATM strike price
+            option_type: "CE" or "PE"
+            spot_ltp: Current spot price
+            min_price: Minimum acceptable premium (default: 150)
+            max_price: Maximum acceptable premium (default: 200)
+        
+        Returns:
+            Tuple of (tradingsymbol, token, premium, strike) or (None, None, None, None)
+        """
+        TradingLogic.logger.info(f"[OPTION_FINDER] Searching for {option_type} option in range ₹{min_price}-₹{max_price}")
+        TradingLogic.logger.info(f"[OPTION_FINDER] ATM Strike: {atm_strike}, Spot: {spot_ltp:.2f}")
+        
+        # Prepare strikes to check: ATM + ITM options
+        if option_type == "CE":
+            strikes = [atm_strike] + [atm_strike - (i * 50) for i in range(1, 6)]  # ATM + 5 ITM strikes
+        else:  # PE
+            strikes = [atm_strike] + [atm_strike + (i * 50) for i in range(1, 6)]  # ATM + 5 ITM strikes
+        
+        # PHASE 1: Batch lookup and fetch for current expiry (FAST - single API call)
+        instruments_to_fetch = []
+        strike_map = {}  # Map NFO:symbol -> (strike, tsym, token)
+        
+        for strike in strikes:
+            tsym, token = self.lookup_option(symbol_name, expiry_date, strike, option_type)
+            if tsym and token:
+                nfo_key = f"NFO:{tsym}"
+                instruments_to_fetch.append(nfo_key)
+                strike_map[nfo_key] = (strike, tsym, token)
+        
+        if instruments_to_fetch:
+            try:
+                # Single batch API call for all options - MUCH FASTER than individual calls
+                ltp_batch = self.kite.ltp(instruments_to_fetch)
+                TradingLogic.logger.info(f"[OPTION_FINDER] Batch fetched {len(ltp_batch)} option prices in single API call")
+                
+                # Check prices in order (ATM first, then ITM)
+                for nfo_key in instruments_to_fetch:
+                    if nfo_key in ltp_batch:
+                        strike, tsym, token = strike_map[nfo_key]
+                        price = ltp_batch[nfo_key]["last_price"]
+                        
+                        if min_price <= price <= max_price:
+                            distance = abs(strike - atm_strike)
+                            position_type = "ATM" if distance == 0 else f"ITM-{distance}"
+                            TradingLogic.logger.info(f"[OPTION_FINDER] ✅ Found {position_type}: {tsym} @ ₹{price:.2f}")
+                            return tsym, token, price, strike
+                        
+                        TradingLogic.logger.debug(f"[OPTION_FINDER] {tsym} @ ₹{price:.2f} - outside range")
+            except Exception as e:
+                TradingLogic.logger.warning(f"[OPTION_FINDER] Batch LTP failed, falling back: {e}")
+        
+        # PHASE 2: Try next expiry only if current expiry failed (rare case)
+        TradingLogic.logger.info(f"[OPTION_FINDER] Current expiry unsuitable, checking next expiry...")
+        next_expiry = self.get_next_next_expiry(expiry_date)
+        
+        # Only check ATM + 2 ITM for next expiry to save time
+        next_strikes = strikes[:3]  # ATM + first 2 ITM
+        instruments_to_fetch = []
+        strike_map = {}
+        
+        for strike in next_strikes:
+            tsym, token = self.lookup_option(symbol_name, next_expiry, strike, option_type)
+            if tsym and token:
+                nfo_key = f"NFO:{tsym}"
+                instruments_to_fetch.append(nfo_key)
+                strike_map[nfo_key] = (strike, tsym, token)
+        
+        if instruments_to_fetch:
+            try:
+                ltp_batch = self.kite.ltp(instruments_to_fetch)
+                TradingLogic.logger.info(f"[OPTION_FINDER] Next expiry: batch fetched {len(ltp_batch)} prices")
+                
+                for nfo_key in instruments_to_fetch:
+                    if nfo_key in ltp_batch:
+                        strike, tsym, token = strike_map[nfo_key]
+                        price = ltp_batch[nfo_key]["last_price"]
+                        
+                        if min_price <= price <= max_price:
+                            distance = abs(strike - atm_strike)
+                            position_type = "ATM" if distance == 0 else f"ITM-{distance}"
+                            TradingLogic.logger.info(f"[OPTION_FINDER] ✅ Next expiry {position_type}: {tsym} @ ₹{price:.2f}")
+                            return tsym, token, price, strike
+            except Exception as e:
+                TradingLogic.logger.warning(f"[OPTION_FINDER] Next expiry batch failed: {e}")
+        
+        TradingLogic.logger.warning(f"[OPTION_FINDER] ❌ No option found in range ₹{min_price}-₹{max_price}")
+        return None, None, None, None
+    
+    def get_next_next_expiry(self, current_expiry: dt.date) -> dt.date:
+        """Get the expiry after the current expiry (next week's expiry)"""
+        # Simply add 7 days to current expiry to get next week's Tuesday
+        return current_expiry + timedelta(days=7)
+    
     # Indicators & data fetch
     def calculate_atr(self, df, period=14):
         high_low = df["high"] - df["low"]
