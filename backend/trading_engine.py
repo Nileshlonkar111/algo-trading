@@ -55,6 +55,7 @@ class TradingEngine:
         self.prev_ema5 = None
         self.prev_ema20 = None
         self.last_reset_date = None  # Track last daily reset
+        self.last_pnl_reset_date = None  # Track last daily PNL reset
         
         # Configure logging to ensure output to stdout
         self.logger.setLevel(logging.DEBUG)
@@ -287,7 +288,7 @@ class TradingEngine:
         now_dt = dt.datetime.now(self.timezone)
         nowt = now_dt.time()
         
-        # Reset EMA state at start of new trading day to prevent stale values from previous day
+        # Reset EMA state and PNL at start of new trading day
         current_date = now_dt.date()
         if self.last_reset_date != current_date:
             self.logger.info(f"[DAILY_RESET] New trading day detected ({current_date}), resetting EMA state")
@@ -296,6 +297,16 @@ class TradingEngine:
             self.last_signal_candle_time = None
             self.last_reset_date = current_date
             self.logger.info("[DAILY_RESET] ✅ EMA state reset complete - fresh start for new day")
+        
+        # Reset daily PNL at start of new trading day
+        if self.last_pnl_reset_date != current_date:
+            old_pnl = self.realized_pnl
+            self.realized_pnl = 0.0
+            self.last_pnl_reset_date = current_date
+            self.session_start_time = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+            self.session_summary_sent = False
+            self.entered_symbols_today.clear()
+            self.logger.info(f"[DAILY_RESET] 💰 PNL reset for new day - Previous day PNL: ₹{old_pnl:.2f}, Reset to: ₹0.00")
         
         self.logger.info(f"[SCAN_START] ========== Scan cycle at {now_dt.strftime('%H:%M:%S')} (5-min candle closed) ==========")
         
@@ -680,21 +691,25 @@ class TradingEngine:
                 except Exception as notify_error:
                     self.logger.error(f"[NOTIFY] Failed to send order_failed notification: {notify_error}")
 
-    def monitor_positions_once(self) -> None:
-        """Monitor and manage open positions from v1.1.py"""
+    def monitor_positions_once(self) -> Dict[str, float]:
+        """Monitor and manage open positions from v1.1.py
+        
+        Returns:
+            Dict[str, float]: Dictionary of symbol -> current LTP for all open positions
+        """
         if self._shutdown_requested:
             self.logger.info("[MONITOR] Shutdown requested, skipping monitoring")
-            return
+            return {}
         
         nowt = dt.datetime.now(self.timezone).time()
         
         # Quick return if no positions
         if not self.positions:
-            return
+            return {}
 
         tokens = [f"NFO:{sym}" for sym in self.positions.keys() if self.positions[sym]["status"] == "OPEN"]
         if not tokens:
-            return
+            return {}
         
         # Log monitoring activity (info level so it's visible)
         open_count = len(tokens)
@@ -727,7 +742,7 @@ class TradingEngine:
                     self.notify("error", {"error": str(e), "type": "ltp_fetch"})
                 except Exception as notify_error:
                     self.logger.error(f"[NOTIFY] Failed to send error notification: {notify_error}")
-            return
+            return {}
 
         trail_start_pct = self.config.get("trail_start_pct", 0.20)
         trail_giveback_pct = self.config.get("trail_giveback_pct", 0.03)
@@ -813,6 +828,9 @@ class TradingEngine:
                             self.notify("order_failed", {"symbol": symbol, "action": "EXIT", "error": str(e)})
                         except Exception as notify_error:
                             self.logger.error(f"[NOTIFY] Failed to send order_failed notification: {notify_error}")
+       
+       # Return LTP data for positions to be used by main.py for broadcasting
+       return ltp_data
 
     def close_all_positions(self) -> None:
         """Emergency close all open positions"""

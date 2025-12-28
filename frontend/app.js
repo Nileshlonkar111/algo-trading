@@ -355,13 +355,19 @@ function updatePositionsFromData(positionsData) {
         return;
     }
     
-    let html = '<table><thead><tr><th>Symbol</th><th>Entry Price</th><th>Current LTP</th><th>Qty</th><th>SL</th><th>Target</th><th>Status</th></tr></thead><tbody>';
+    let html = '<table><thead><tr><th>Symbol</th><th>Entry Price</th><th>Current LTP</th><th>Unrealized P&L</th><th>Qty</th><th>SL</th><th>Target</th><th>Status</th></tr></thead><tbody>';
     
     for (const [symbol, pos] of positions) {
+        const currentLTP = pos.current_ltp || 0;
+        const unrealizedPnL = pos.unrealized_pnl || 0;
+        const unrealizedPnLPct = pos.unrealized_pnl_pct || 0;
+        const pnlClass = unrealizedPnL >= 0 ? 'positive' : 'negative';
+        
         html += `<tr>
             <td>${symbol}</td>
             <td>₹${pos.entry_price?.toFixed(2) || 0}</td>
-            <td>-</td>
+            <td>₹${currentLTP.toFixed(2)}</td>
+            <td class="${pnlClass}">₹${unrealizedPnL.toFixed(2)} (${unrealizedPnLPct.toFixed(2)}%)</td>
             <td>${pos.quantity || 0}</td>
             <td>₹${pos.sl_price?.toFixed(2) || 0}</td>
             <td>₹${pos.target_price?.toFixed(2) || 0}</td>

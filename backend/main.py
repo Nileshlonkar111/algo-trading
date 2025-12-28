@@ -325,6 +325,42 @@ async def broadcast_updates_task():
             if ws_manager.get_connection_count() > 0:
                 auth_status = kite_service.token_status()
                 
+                # Get positions with current LTP data
+                positions = trading_engine.get_positions()
+                
+                # Fetch LTPs for open positions to show real-time PNL
+                position_ltps = {}
+                open_positions = {sym: pos for sym, pos in positions.items() if pos["status"] == "OPEN"}
+                
+                if open_positions:
+                    try:
+                        tokens = [f"NFO:{sym}" for sym in open_positions.keys()]
+                        ltp_info = trading_engine.kite.ltp(tokens)
+                        
+                        for sym in open_positions.keys():
+                            key = f"NFO:{sym}"
+                            entry = ltp_info.get(key)
+                            if entry:
+                                if isinstance(entry, dict):
+                                    if "last_price" in entry:
+                                        position_ltps[sym] = entry["last_price"]
+                                    else:
+                                        position_ltps[sym] = list(entry.values())[0]["last_price"]
+                    except Exception as e:
+                        logger.debug(f"[WS_BROADCAST] Could not fetch position LTPs: {e}")
+                
+                # Add LTP data to positions
+                positions_with_ltp = {}
+                for sym, pos in positions.items():
+                    pos_copy = pos.copy()
+                    if sym in position_ltps:
+                        pos_copy["current_ltp"] = position_ltps[sym]
+                        # Calculate unrealized PNL
+                        if pos["status"] == "OPEN":
+                            pos_copy["unrealized_pnl"] = (position_ltps[sym] - pos["entry_price"]) * pos["quantity"]
+                            pos_copy["unrealized_pnl_pct"] = ((position_ltps[sym] - pos["entry_price"]) / pos["entry_price"] * 100) if pos["entry_price"] > 0 else 0
+                    positions_with_ltp[sym] = pos_copy
+                
                 dashboard_data = {
                     "type": "dashboard_update",
                     "data": {
@@ -332,13 +368,13 @@ async def broadcast_updates_task():
                             "active": trading_active,
                             "authenticated": auth_status.value == "authenticated",
                             "token_status": auth_status.value,
-                            "open_positions": sum(1 for p in trading_engine.positions.values() if p["status"] == "OPEN")
+                            "open_positions": len(open_positions)
                         },
                         "pnl": {
                             "realized_pnl": trading_engine.get_pnl(),
                             "daily_pl_ratio": trading_engine.daily_pl_ratio()
                         },
-                        "positions": trading_engine.get_positions(),
+                        "positions": positions_with_ltp,
                         "logs": trading_engine.get_trade_logs()[-20:] if len(trading_engine.get_trade_logs()) > 0 else [],
                         "notifications": notifications[-20:] if len(notifications) > 0 else []
                     }
@@ -387,7 +423,8 @@ async def trading_loop():
         while trading_active:
             try:
                 # CRITICAL: Monitor positions every 3 seconds for fast reaction
-                trading_engine.monitor_positions_once()
+                # Returns LTP data for all open positions
+                position_ltps = trading_engine.monitor_positions_once()
                 
                 # Check if we're at a 5-minute candle close boundary
                 current_time = dt.datetime.now()
