@@ -828,9 +828,9 @@ class TradingEngine:
                             self.notify("order_failed", {"symbol": symbol, "action": "EXIT", "error": str(e)})
                         except Exception as notify_error:
                             self.logger.error(f"[NOTIFY] Failed to send order_failed notification: {notify_error}")
-       
-       # Return LTP data for positions to be used by main.py for broadcasting
-       return ltp_data
+        
+        # Return LTP data for positions to be used by main.py for broadcasting
+        return ltp_data
 
     def close_all_positions(self) -> None:
         """Emergency close all open positions"""
