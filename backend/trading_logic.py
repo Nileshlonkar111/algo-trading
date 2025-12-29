@@ -254,12 +254,12 @@ class TradingLogic:
         # Calculate from_dt by going back 'days' calendar days
         from_dt = now - timedelta(days=days)
         
-        TradingLogic.logger.info(f"[FETCH_SPOT] Requesting {days} days of data from {from_dt.strftime('%Y-%m-%d %H:%M IST')} to {to_dt.strftime('%Y-%m-%d %H:%M IST')}")
-        
-        # Fetch completed historical candles - API expects naive datetime in IST
         # Convert timezone-aware datetime to naive for API compatibility
         from_dt_naive = from_dt.replace(tzinfo=None)
         to_dt_naive = to_dt.replace(tzinfo=None)
+        
+        TradingLogic.logger.info(f"[FETCH_SPOT] Fetching historical data from {from_dt_naive.strftime('%Y-%m-%d %H:%M')} IST to {to_dt_naive.strftime('%Y-%m-%d %H:%M')} IST")
+        TradingLogic.logger.debug(f"[FETCH_SPOT] Requested {days} days back: from_dt_naive={from_dt_naive}, to_dt_naive={to_dt_naive}")
         
         data = self.kite.historical_data(nifty_token, from_dt_naive, to_dt_naive, "5minute")
         df = pd.DataFrame(data)
