@@ -259,6 +259,11 @@ class TradingLogic:
         # Calculate from_dt by going back 'days' calendar days
         from_dt = now - timedelta(days=days)
         
+        # DEBUG: Log the actual calculation
+        TradingLogic.logger.debug(f"[FETCH_SPOT_DEBUG] now={now}, days={days}, timedelta(days={days})={timedelta(days=days)}")
+        TradingLogic.logger.debug(f"[FETCH_SPOT_DEBUG] from_dt calculation: {now} - {timedelta(days=days)} = {from_dt}")
+        TradingLogic.logger.debug(f"[FETCH_SPOT_DEBUG] Date difference: {(to_dt - from_dt).days} days")
+        
         # Convert timezone-aware datetime to naive for API compatibility
         from_dt_naive = from_dt.replace(tzinfo=None)
         to_dt_naive = to_dt.replace(tzinfo=None)
