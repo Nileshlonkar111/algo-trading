@@ -413,8 +413,10 @@ class TradingEngine:
                     self.logger.error(f"[NOTIFY] Failed to send error notification: {notify_error}")
             return
 
-        if spot_df is None or len(spot_df) < 10:
-            self.logger.info(f"[SCAN] Not enough spot candles: {len(spot_df) if spot_df is not None else 0}/10")
+        # Reduced from 10 to 3 - with yesterday's data seeding, EMAs are available from first candle
+        min_candles_required = 3
+        if spot_df is None or len(spot_df) < min_candles_required:
+            self.logger.info(f"[SCAN] Not enough spot candles: {len(spot_df) if spot_df is not None else 0}/{min_candles_required}")
             return
 
         # Filter to only TODAY's candles for EMA crossover detection

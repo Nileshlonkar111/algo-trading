@@ -270,29 +270,57 @@ class TradingLogic:
         if df is None or df.empty:
             return df
         
-        # Calculate EMAs only on TODAY's data to match charting platforms
-        # This prevents yesterday's EMA values from affecting today's calculations
-        today = dt.datetime.now(self.timezone).date()
-        
-        # Keep full dataset for ATR calculation (needs historical data)
+        # Calculate ATR on full dataset (needs historical data)
         df["ATR"] = self.calculate_atr(df, period=atr_period)
         
-        # Filter to today's data for EMA calculation
+        # Calculate EMAs with previous day seeding for accurate early morning values
+        today = dt.datetime.now(self.timezone).date()
+        yesterday = today - timedelta(days=1)
+        
+        # Separate today's and yesterday's data
         today_mask = df["datetime"].dt.date == today
+        yesterday_mask = df["datetime"].dt.date == yesterday
+        
         today_indices = df[today_mask].index
+        yesterday_indices = df[yesterday_mask].index
         
         if len(today_indices) > 0:
-            # Calculate EMAs only on today's data
-            today_close = df.loc[today_indices, "close"]
-            df.loc[today_indices, "EMA5"] = today_close.ewm(span=5, adjust=False).mean()
-            df.loc[today_indices, "EMA20"] = today_close.ewm(span=20, adjust=False).mean()
+            # Calculate EMAs on COMBINED data (yesterday + today) for continuity
+            # This matches how professional charting platforms work
+            if len(yesterday_indices) > 0:
+                # Use last 50 candles from yesterday (more than enough for EMA20)
+                yesterday_tail = df[yesterday_mask].tail(50)
+                today_data = df[today_mask]
+                combined_data = pd.concat([yesterday_tail, today_data])
+                
+                # Calculate EMAs on combined dataset
+                combined_data["EMA5"] = combined_data["close"].ewm(span=5, adjust=False).mean()
+                combined_data["EMA20"] = combined_data["close"].ewm(span=20, adjust=False).mean()
+                
+                # Extract only today's EMA values
+                today_ema_data = combined_data[combined_data["datetime"].dt.date == today]
+                df.loc[today_indices, "EMA5"] = today_ema_data["EMA5"].values
+                df.loc[today_indices, "EMA20"] = today_ema_data["EMA20"].values
+                
+                # Set yesterday's EMAs to NaN (we don't need them)
+                df.loc[yesterday_mask, "EMA5"] = float('nan')
+                df.loc[yesterday_mask, "EMA20"] = float('nan')
+                
+                TradingLogic.logger.info(f"[INDICATORS] Calculated EMAs using {len(yesterday_tail)} yesterday candles + {len(today_indices)} today candles")
+                TradingLogic.logger.info(f"[INDICATORS] ✅ EMAs available from first candle of the day (seeded from previous day)")
+            else:
+                # No yesterday's data - calculate on today's data only (fallback)
+                today_close = df.loc[today_indices, "close"]
+                df.loc[today_indices, "EMA5"] = today_close.ewm(span=5, adjust=False).mean()
+                df.loc[today_indices, "EMA20"] = today_close.ewm(span=20, adjust=False).mean()
+                
+                TradingLogic.logger.warning(f"[INDICATORS] No yesterday data - EMAs calculated on {len(today_indices)} today candles only")
+                TradingLogic.logger.warning(f"[INDICATORS] ⚠️ First few EMAs may be less reliable without seeding")
             
-            # For historical data (yesterday), set EMAs to NaN
-            yesterday_mask = ~today_mask
-            df.loc[yesterday_mask, "EMA5"] = float('nan')
-            df.loc[yesterday_mask, "EMA20"] = float('nan')
-            
-            TradingLogic.logger.info(f"[INDICATORS] Calculated EMAs on {len(today_indices)} candles from today ({today})")
+            # Set EMAs to NaN for any other historical data
+            other_mask = ~today_mask & ~yesterday_mask
+            df.loc[other_mask, "EMA5"] = float('nan')
+            df.loc[other_mask, "EMA20"] = float('nan')
         else:
             # No today's data, set all EMAs to NaN
             df["EMA5"] = float('nan')
