@@ -247,7 +247,7 @@ class TradingLogic:
     
     @retry_on_exception(retries=3, delay=2)
     def fetch_spot_5m(self, nifty_token, days=5):
-        """Fetch 5-minute historical data - increased to 5 days to handle weekends/holidays"""
+        """Fetch 5-minute historical data - 5 days handles weekends/holidays efficiently"""
         # Use IST timezone for all datetime operations
         now = dt.datetime.now(self.timezone)
         to_dt = now
@@ -277,7 +277,7 @@ class TradingLogic:
         return df
     
     def fetch_fut_5m(self, fut_token, days=2):
-        """Fetch 5-minute futures data - live injection handled separately via tradingsymbol"""
+        """Fetch 5-minute futures data - 2 days is enough since VWAP only uses today's data"""
         try:
             # Use IST timezone
             to_dt = dt.datetime.now(self.timezone)
@@ -295,17 +295,33 @@ class TradingLogic:
     
     
     def compute_vwap(self, df):
-        """Compute VWAP using typical price."""
+        """Compute VWAP using typical price - calculated ONLY on today's data (intraday indicator)."""
         if df is None or df.empty:
             return df
-        if not {"high", "low", "close"}.issubset(df.columns):
+        if not {"high", "low", "close", "datetime"}.issubset(df.columns):
             return df
-        typical = (df["high"] + df["low"] + df["close"]) / 3.0
-        if "volume" in df.columns and df["volume"].notna().any() and (df["volume"] > 0).any():
-            volume_cumsum = df["volume"].replace(0, pd.NA).cumsum()
-            df["VWAP"] = (typical * df["volume"]).cumsum() / volume_cumsum.replace(0, pd.NA)
-        else:
-            df["VWAP"] = typical.cumsum() / pd.Series(range(1, len(df) + 1))
+        
+        # Filter to TODAY's data only - VWAP resets daily
+        today = dt.datetime.now(self.timezone).date()
+        today_mask = df["datetime"].dt.date == today
+        
+        # Initialize VWAP column with NaN
+        df["VWAP"] = float('nan')
+        
+        if today_mask.any():
+            # Calculate VWAP only on today's data
+            today_df = df[today_mask].copy()
+            typical = (today_df["high"] + today_df["low"] + today_df["close"]) / 3.0
+            
+            if "volume" in today_df.columns and today_df["volume"].notna().any() and (today_df["volume"] > 0).any():
+                volume_cumsum = today_df["volume"].replace(0, pd.NA).cumsum()
+                today_df["VWAP"] = (typical * today_df["volume"]).cumsum() / volume_cumsum.replace(0, pd.NA)
+            else:
+                today_df["VWAP"] = typical.cumsum() / pd.Series(range(1, len(today_df) + 1))
+            
+            # Assign back to original dataframe
+            df.loc[today_mask, "VWAP"] = today_df["VWAP"].values
+        
         return df
     
     def add_spot_indicators(self, df, atr_period=14):

@@ -375,7 +375,7 @@ class TradingEngine:
         try:
             nifty_token = self.config.get("nifty_token", 256265)
             self.logger.info(f"[SCAN_DATA] Fetching spot data for token {nifty_token}...")
-            spot_df = self.logic.fetch_spot_5m(nifty_token, days=2)
+            spot_df = self.logic.fetch_spot_5m(nifty_token)  # Uses default days=10 from function
             
             if spot_df is not None and not spot_df.empty:
                 self.logger.info(f"[SCAN_DATA] Fetched {len(spot_df)} candles, Date range: {spot_df['datetime'].min()} to {spot_df['datetime'].max()}")
@@ -601,7 +601,7 @@ class TradingEngine:
                 self.logger.error("[ERROR] Cannot proceed without NIFTY FUT token")
                 return
 
-            fut_df = self.logic.fetch_fut_5m(fut_token, days=2)
+            fut_df = self.logic.fetch_fut_5m(fut_token)  # Uses default days=10 from function
             if fut_df is None or len(fut_df) < 10:
                 self.logger.warning(f"[SCAN] Not enough FUT candles: {len(fut_df) if fut_df is not None else 0}/10")
                 return
