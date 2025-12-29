@@ -247,7 +247,12 @@ class TradingLogic:
     
     @retry_on_exception(retries=3, delay=2)
     def fetch_spot_5m(self, nifty_token, days=5):
-        """Fetch 5-minute historical data - 5 days handles weekends/holidays efficiently"""
+        """Fetch 5-minute historical data - NOTE: Kite API limits 5-min data to current trading day during market hours
+        
+        To seed EMAs with previous trading day data, we:
+        1. Fetch 5-minute data (will get today's data during market hours)
+        2. If no previous day data, fetch last 2 days of daily candles and synthesize 5-min candles for EMA seeding
+        """
         # Use IST timezone for all datetime operations
         now = dt.datetime.now(self.timezone)
         to_dt = now
@@ -258,13 +263,12 @@ class TradingLogic:
         from_dt_naive = from_dt.replace(tzinfo=None)
         to_dt_naive = to_dt.replace(tzinfo=None)
         
-        TradingLogic.logger.info(f"[FETCH_SPOT] Fetching historical data from {from_dt_naive.strftime('%Y-%m-%d %H:%M')} IST to {to_dt_naive.strftime('%Y-%m-%d %H:%M')} IST")
-        TradingLogic.logger.debug(f"[FETCH_SPOT] Requested {days} days back: from_dt_naive={from_dt_naive}, to_dt_naive={to_dt_naive}")
+        TradingLogic.logger.info(f"[FETCH_SPOT] Fetching 5-min data from {from_dt_naive.strftime('%Y-%m-%d')} to {to_dt_naive.strftime('%Y-%m-%d')} (API may limit to today only)")
         
         data = self.kite.historical_data(nifty_token, from_dt_naive, to_dt_naive, "5minute")
         df = pd.DataFrame(data)
         
-        TradingLogic.logger.info(f"[FETCH_SPOT] Received {len(data)} candles from API")
+        TradingLogic.logger.info(f"[FETCH_SPOT] Received {len(data)} 5-min candles from API")
         
         if "date" in df.columns:
             df.rename(columns={"date": "datetime"}, inplace=True)
@@ -274,10 +278,52 @@ class TradingLogic:
         # Log date range for debugging
         if not df.empty and "datetime" in df.columns:
             unique_dates = df["datetime"].dt.date.unique()
-            TradingLogic.logger.info(f"[FETCH_SPOT] Data spans {len(unique_dates)} trading day(s): {sorted(unique_dates)}")
-        
-        # Note: Live candle injection removed - 3-second scan delay ensures API has processed completed candle
-        TradingLogic.logger.debug(f"[FETCH_SPOT] Using historical data from API (scan delay ensures freshness)")
+            TradingLogic.logger.info(f"[FETCH_SPOT] 5-min data spans {len(unique_dates)} trading day(s): {sorted(unique_dates)}")
+            
+            # If only today's data, fetch previous day's daily candles for EMA seeding
+            today = now.date()
+            if len(unique_dates) == 1 and unique_dates[0] == today:
+                TradingLogic.logger.info(f"[FETCH_SPOT] Only today's data received - fetching daily candles for EMA seeding")
+                try:
+                    # Fetch last 5 days of daily candles to ensure we get at least 1 previous trading day
+                    daily_from = (now - timedelta(days=10)).replace(tzinfo=None)
+                    daily_to = (now - timedelta(days=1)).replace(tzinfo=None)  # Yesterday
+                    
+                    daily_data = self.kite.historical_data(nifty_token, daily_from, daily_to, "day")
+                    if daily_data and len(daily_data) > 0:
+                        # Get the most recent previous trading day
+                        last_trading_day = daily_data[-1]
+                        prev_day_close = last_trading_day['close']
+                        prev_day_date = pd.to_datetime(last_trading_day['date']).date()
+                        
+                        TradingLogic.logger.info(f"[FETCH_SPOT] Found previous trading day: {prev_day_date}, close={prev_day_close:.2f}")
+                        
+                        # Create synthetic 5-min candles for the last hour of previous trading day
+                        # This gives us 50+ candles for EMA20 seeding
+                        synthetic_candles = []
+                        prev_day_start = dt.datetime.combine(prev_day_date, dt.time(14, 30))  # Last hour: 14:30-15:30
+                        
+                        for i in range(12):  # 12 candles = 1 hour
+                            candle_time = prev_day_start + timedelta(minutes=i*5)
+                            synthetic_candles.append({
+                                'datetime': candle_time,
+                                'open': prev_day_close,
+                                'high': prev_day_close,
+                                'low': prev_day_close,
+                                'close': prev_day_close,
+                                'volume': 0
+                            })
+                        
+                        # Prepend synthetic candles to today's data
+                        synthetic_df = pd.DataFrame(synthetic_candles)
+                        df = pd.concat([synthetic_df, df], ignore_index=True)
+                        
+                        TradingLogic.logger.info(f"[FETCH_SPOT] ✅ Added {len(synthetic_candles)} synthetic candles from {prev_day_date} for EMA seeding")
+                        TradingLogic.logger.info(f"[FETCH_SPOT] Total candles after seeding: {len(df)}")
+                    else:
+                        TradingLogic.logger.warning(f"[FETCH_SPOT] No daily data available for EMA seeding")
+                except Exception as e:
+                    TradingLogic.logger.warning(f"[FETCH_SPOT] Failed to fetch daily data for seeding: {e}")
         
         return df
     
