@@ -71,13 +71,50 @@ class TradingLogic:
                     continue
     
     def get_next_expiry(self) -> dt.date:
-        """Return next weekly expiry (Tuesday); if today is Tuesday after 15:30, jump to next week."""
-        today_ist = dt.datetime.now(self.timezone).date()
-        days_ahead = (1 - today_ist.weekday()) % 7
-        expiry = today_ist + timedelta(days=days_ahead)
-        if today_ist.weekday() == 1 and dt.datetime.now(self.timezone).time() > self.MARKET_CLOSE_TIME:
-            expiry += timedelta(days=7)
-        return expiry
+        """Find actual next NIFTY expiry from available options (handles holidays automatically)"""
+        try:
+            instruments = self.load_instruments()
+            today = dt.datetime.now(self.timezone).date()
+            
+            # Find all NIFTY option expiries that are >= today
+            nifty_expiries = set()
+            for inst in instruments:
+                if inst.get("name") == "NIFTY" and inst.get("instrument_type") in ["CE", "PE"]:
+                    expiry = inst.get("expiry")
+                    # Handle both datetime and date objects
+                    if isinstance(expiry, dt.datetime):
+                        expiry = expiry.date()
+                    if expiry and isinstance(expiry, dt.date) and expiry >= today:
+                        nifty_expiries.add(expiry)
+            
+            if nifty_expiries:
+                # Return the nearest expiry (current week's expiry)
+                next_expiry = min(nifty_expiries)
+                
+                # If we're past market close on expiry day, skip to next expiry
+                if next_expiry == today and dt.datetime.now(self.timezone).time() > self.MARKET_CLOSE_TIME:
+                    nifty_expiries.remove(next_expiry)
+                    if nifty_expiries:
+                        next_expiry = min(nifty_expiries)
+                
+                TradingLogic.logger.info(f"[EXPIRY] Found actual next expiry from NSE: {next_expiry} ({next_expiry.strftime('%A')})")
+                return next_expiry
+            else:
+                # Fallback to calculated Tuesday (should rarely happen)
+                TradingLogic.logger.warning("[EXPIRY] No expiries found in instruments, using calculated Tuesday (fallback)")
+                days_ahead = (1 - today.weekday()) % 7
+                fallback_expiry = today + timedelta(days=days_ahead) if days_ahead > 0 else today + timedelta(days=7)
+                return fallback_expiry
+                
+        except Exception as e:
+            TradingLogic.logger.error(f"[EXPIRY] Error finding expiry: {e}, using calculated Tuesday (fallback)")
+            # Fallback to calculated Tuesday
+            today_ist = dt.datetime.now(self.timezone).date()
+            days_ahead = (1 - today_ist.weekday()) % 7
+            expiry = today_ist + timedelta(days=days_ahead) if days_ahead > 0 else today_ist + timedelta(days=7)
+            if today_ist.weekday() == 1 and dt.datetime.now(self.timezone).time() > self.MARKET_CLOSE_TIME:
+                expiry += timedelta(days=7)
+            return expiry
     
     def round_to_50(self, x: float) -> int:
         return int(round(x / 50.0) * 50)
@@ -209,8 +246,8 @@ class TradingLogic:
         return atr
     
     @retry_on_exception(retries=3, delay=2)
-    def fetch_spot_5m(self, nifty_token, days=2):
-        """Fetch 5-minute historical data with live candle injection during market hours"""
+    def fetch_spot_5m(self, nifty_token, days=5):
+        """Fetch 5-minute historical data - increased to 5 days to handle weekends/holidays"""
         # Use IST timezone for all datetime operations
         now = dt.datetime.now(self.timezone)
         to_dt = now
@@ -228,6 +265,11 @@ class TradingLogic:
             df.rename(columns={"date": "datetime"}, inplace=True)
         if "datetime" in df.columns:
             df["datetime"] = pd.to_datetime(df["datetime"])
+        
+        # Log date range for debugging
+        if not df.empty and "datetime" in df.columns:
+            unique_dates = df["datetime"].dt.date.unique()
+            TradingLogic.logger.info(f"[FETCH_SPOT] Data spans {len(unique_dates)} trading day(s): {sorted(unique_dates)}")
         
         # Note: Live candle injection removed - 3-second scan delay ensures API has processed completed candle
         TradingLogic.logger.debug(f"[FETCH_SPOT] Using historical data from API (scan delay ensures freshness)")
@@ -273,25 +315,33 @@ class TradingLogic:
         # Calculate ATR on full dataset (needs historical data)
         df["ATR"] = self.calculate_atr(df, period=atr_period)
         
-        # Calculate EMAs with previous day seeding for accurate early morning values
+        # Calculate EMAs with previous trading day seeding for accurate early morning values
         today = dt.datetime.now(self.timezone).date()
-        yesterday = today - timedelta(days=1)
         
-        # Separate today's and yesterday's data
+        # Separate today's and previous trading day's data
         today_mask = df["datetime"].dt.date == today
-        yesterday_mask = df["datetime"].dt.date == yesterday
-        
         today_indices = df[today_mask].index
-        yesterday_indices = df[yesterday_mask].index
+        
+        # Find the most recent previous trading day (handles weekends/holidays automatically)
+        previous_dates = df[~today_mask]["datetime"].dt.date.unique()
+        previous_trading_day = previous_dates.max() if len(previous_dates) > 0 else None
+        
+        if previous_trading_day:
+            previous_mask = df["datetime"].dt.date == previous_trading_day
+            previous_indices = df[previous_mask].index
+            TradingLogic.logger.info(f"[INDICATORS] Previous trading day: {previous_trading_day} ({len(previous_indices)} candles)")
+        else:
+            previous_mask = pd.Series([False] * len(df), index=df.index)
+            previous_indices = df[previous_mask].index
         
         if len(today_indices) > 0:
-            # Calculate EMAs on COMBINED data (yesterday + today) for continuity
+            # Calculate EMAs on COMBINED data (previous trading day + today) for continuity
             # This matches how professional charting platforms work
-            if len(yesterday_indices) > 0:
-                # Use last 50 candles from yesterday (more than enough for EMA20)
-                yesterday_tail = df[yesterday_mask].tail(50)
+            if len(previous_indices) > 0:
+                # Use last 50 candles from previous trading day (more than enough for EMA20)
+                previous_tail = df[previous_mask].tail(50)
                 today_data = df[today_mask]
-                combined_data = pd.concat([yesterday_tail, today_data])
+                combined_data = pd.concat([previous_tail, today_data])
                 
                 # Calculate EMAs on combined dataset
                 combined_data["EMA5"] = combined_data["close"].ewm(span=5, adjust=False).mean()
@@ -302,23 +352,26 @@ class TradingLogic:
                 df.loc[today_indices, "EMA5"] = today_ema_data["EMA5"].values
                 df.loc[today_indices, "EMA20"] = today_ema_data["EMA20"].values
                 
-                # Set yesterday's EMAs to NaN (we don't need them)
-                df.loc[yesterday_mask, "EMA5"] = float('nan')
-                df.loc[yesterday_mask, "EMA20"] = float('nan')
+                # Set previous day's EMAs to NaN (we don't need them)
+                df.loc[previous_mask, "EMA5"] = float('nan')
+                df.loc[previous_mask, "EMA20"] = float('nan')
                 
-                TradingLogic.logger.info(f"[INDICATORS] Calculated EMAs using {len(yesterday_tail)} yesterday candles + {len(today_indices)} today candles")
-                TradingLogic.logger.info(f"[INDICATORS] ✅ EMAs available from first candle of the day (seeded from previous day)")
+                TradingLogic.logger.info(f"[INDICATORS] Calculated EMAs using {len(previous_tail)} previous day candles + {len(today_indices)} today candles")
+                TradingLogic.logger.info(f"[INDICATORS] ✅ EMAs available from first candle (seeded from {previous_trading_day})")
             else:
-                # No yesterday's data - calculate on today's data only (fallback)
+                # No previous trading day's data - calculate on today's data only (fallback)
                 today_close = df.loc[today_indices, "close"]
                 df.loc[today_indices, "EMA5"] = today_close.ewm(span=5, adjust=False).mean()
                 df.loc[today_indices, "EMA20"] = today_close.ewm(span=20, adjust=False).mean()
                 
-                TradingLogic.logger.warning(f"[INDICATORS] No yesterday data - EMAs calculated on {len(today_indices)} today candles only")
+                TradingLogic.logger.warning(f"[INDICATORS] No previous trading day data - EMAs calculated on {len(today_indices)} today candles only")
                 TradingLogic.logger.warning(f"[INDICATORS] ⚠️ First few EMAs may be less reliable without seeding")
             
             # Set EMAs to NaN for any other historical data
-            other_mask = ~today_mask & ~yesterday_mask
+            if previous_trading_day:
+                other_mask = ~today_mask & ~previous_mask
+            else:
+                other_mask = ~today_mask
             df.loc[other_mask, "EMA5"] = float('nan')
             df.loc[other_mask, "EMA20"] = float('nan')
         else:
