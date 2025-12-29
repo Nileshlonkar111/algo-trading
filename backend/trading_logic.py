@@ -251,12 +251,17 @@ class TradingLogic:
         # Use IST timezone for all datetime operations
         now = dt.datetime.now(self.timezone)
         to_dt = now
+        # Calculate from_dt by going back 'days' calendar days
         from_dt = now - timedelta(days=days)
         
-        TradingLogic.logger.info(f"[FETCH_SPOT] Fetching historical data from {from_dt.strftime('%Y-%m-%d %H:%M IST')} to {to_dt.strftime('%Y-%m-%d %H:%M IST')}")
+        TradingLogic.logger.info(f"[FETCH_SPOT] Requesting {days} days of data from {from_dt.strftime('%Y-%m-%d %H:%M IST')} to {to_dt.strftime('%Y-%m-%d %H:%M IST')}")
         
-        # Fetch completed historical candles
-        data = self.kite.historical_data(nifty_token, from_dt, to_dt, "5minute")
+        # Fetch completed historical candles - API expects naive datetime in IST
+        # Convert timezone-aware datetime to naive for API compatibility
+        from_dt_naive = from_dt.replace(tzinfo=None)
+        to_dt_naive = to_dt.replace(tzinfo=None)
+        
+        data = self.kite.historical_data(nifty_token, from_dt_naive, to_dt_naive, "5minute")
         df = pd.DataFrame(data)
         
         TradingLogic.logger.info(f"[FETCH_SPOT] Received {len(data)} candles from API")
@@ -282,7 +287,12 @@ class TradingLogic:
             # Use IST timezone
             to_dt = dt.datetime.now(self.timezone)
             from_dt = to_dt - timedelta(days=days)
-            data = self.kite.historical_data(fut_token, from_dt, to_dt, "5minute")
+            
+            # Convert timezone-aware datetime to naive for API compatibility
+            from_dt_naive = from_dt.replace(tzinfo=None)
+            to_dt_naive = to_dt.replace(tzinfo=None)
+            
+            data = self.kite.historical_data(fut_token, from_dt_naive, to_dt_naive, "5minute")
             df = pd.DataFrame(data)
             if "date" in df.columns:
                 df.rename(columns={"date": "datetime"}, inplace=True)
