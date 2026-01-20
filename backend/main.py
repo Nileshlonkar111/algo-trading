@@ -14,6 +14,7 @@ import logging
 import sys
 import datetime as dt
 import uuid
+import pytz
 
 # Ensure NO websocket_status import
 load_dotenv()
@@ -72,6 +73,23 @@ trading_config = {
     "trail_start_pct": float(os.getenv("TRAIL_START_PCT", "0.15")),
     "trail_giveback_pct": float(os.getenv("TRAIL_GIVEBACK_PCT", "0.10")),
     "min_vwap_distance_pct": float(os.getenv("MIN_VWAP_DISTANCE_PCT", "0.15")),
+    
+    # Trending market entry strategies (toggleable)
+    "enable_crossover_entries": os.getenv("ENABLE_CROSSOVER_ENTRIES", "true").lower() == "true",
+    "enable_pullback_entries": os.getenv("ENABLE_PULLBACK_ENTRIES", "true").lower() == "true",
+    "enable_vwap_momentum_entries": os.getenv("ENABLE_VWAP_MOMENTUM_ENTRIES", "false").lower() == "true",
+    "enable_consecutive_pattern_entries": os.getenv("ENABLE_CONSECUTIVE_PATTERN_ENTRIES", "false").lower() == "true",
+    
+    # Pullback strategy parameters (EMA20 only)
+    "min_trend_separation_pct": float(os.getenv("MIN_TREND_SEPARATION_PCT", "0.2")),
+    "pullback_cooldown_minutes": int(os.getenv("PULLBACK_COOLDOWN_MINUTES", "20")),
+    
+    # VWAP momentum strategy parameters
+    "vwap_momentum_distance_pct": float(os.getenv("VWAP_MOMENTUM_DISTANCE_PCT", "0.3")),
+    
+    # Consecutive pattern strategy parameters
+    "consecutive_candles_required": int(os.getenv("CONSECUTIVE_CANDLES_REQUIRED", "3")),
+    "consecutive_vwap_distance_pct": float(os.getenv("CONSECUTIVE_VWAP_DISTANCE_PCT", "0.5")),
 }
 
 # Modified notification handler to also broadcast via WebSocket
@@ -394,10 +412,99 @@ async def broadcast_updates_task():
             await asyncio.sleep(5)
 
 
+# Auto-trading scheduler
+scheduler_task_handle = None
+IST = pytz.timezone('Asia/Kolkata')
+
+async def auto_trading_scheduler():
+    """
+    Intelligent scheduler that:
+    1. Automatically starts trading at market open (09:15 AM IST)
+    2. Automatically stops trading at market close (15:30 PM IST)
+    3. Resumes trading if server restarts during market hours
+    4. Waits until next market open if server starts outside market hours
+    """
+    global trading_active
+    logger.info("[SCHEDULER] Auto-trading scheduler started")
+    
+    while True:
+        try:
+            now_ist = dt.datetime.now(IST)
+            current_time = now_ist.time()
+            current_date = now_ist.date()
+            
+            # Market hours: 9:15 AM - 3:30 PM IST
+            market_open = dt.time(9, 15)
+            market_close = dt.time(15, 30)
+            
+            # Check if it's a weekday (Monday=0 to Friday=4)
+            is_weekday = now_ist.weekday() < 5
+            
+            # Check if we're in market hours
+            in_market_hours = market_open <= current_time <= market_close and is_weekday
+            
+            # AUTO-START: Start trading if in market hours and not active
+            if in_market_hours and not trading_active:
+                try:
+                    # Verify Kite authentication
+                    kite_service.ensure_authenticated()
+                    
+                    logger.info(f"[SCHEDULER] 🚀 AUTO-START: Market is open, starting trading at {current_time.strftime('%H:%M:%S')}")
+                    trading_active = True
+                    save_trading_active(trading_active)
+                    asyncio.create_task(trading_loop())
+                    
+                except Exception as e:
+                    logger.error(f"[SCHEDULER] Cannot auto-start trading - Kite auth failed: {e}")
+                    logger.info("[SCHEDULER] Will retry authentication in 5 minutes")
+                    await asyncio.sleep(300)  # Retry in 5 minutes
+                    continue
+            
+            # AUTO-STOP: Stop trading if market closed and still active
+            elif not in_market_hours and trading_active:
+                logger.info(f"[SCHEDULER] 🛑 AUTO-STOP: Market closed, stopping trading at {current_time.strftime('%H:%M:%S')}")
+                trading_active = False
+                save_trading_active(trading_active)
+            
+            # WAIT FOR MARKET OPEN: Calculate time until next market open
+            if not in_market_hours:
+                if current_time > market_close:
+                    # Market closed for today, wait until tomorrow
+                    next_open = dt.datetime.combine(
+                        current_date + dt.timedelta(days=1),
+                        market_open
+                    )
+                    # Skip weekends
+                    while next_open.weekday() >= 5:  # Saturday=5, Sunday=6
+                        next_open += dt.timedelta(days=1)
+                else:
+                    # Before market open today
+                    next_open = dt.datetime.combine(current_date, market_open)
+                    # If today is weekend, move to Monday
+                    while next_open.weekday() >= 5:
+                        next_open += dt.timedelta(days=1)
+                
+                next_open_ist = IST.localize(next_open)
+                wait_seconds = (next_open_ist - now_ist).total_seconds()
+                wait_hours = wait_seconds / 3600
+                
+                logger.info(f"[SCHEDULER] 💤 Market closed. Next market open: {next_open_ist.strftime('%Y-%m-%d %H:%M:%S')} ({wait_hours:.1f} hours)")
+                
+                # Check every 5 minutes while waiting for market open
+                await asyncio.sleep(min(300, max(60, wait_seconds - 60)))
+            else:
+                # During market hours, check every 60 seconds
+                await asyncio.sleep(60)
+                
+        except Exception as e:
+            logger.error(f"[SCHEDULER] Error in auto-trading scheduler: {e}", exc_info=True)
+            await asyncio.sleep(60)
+
+
 @app.on_event("startup")
 async def startup_event():
     """Start background tasks on application startup"""
-    global broadcast_task_handle
+    global broadcast_task_handle, scheduler_task_handle
     
     logger.info("[STARTUP] Starting background tasks")
     
@@ -407,7 +514,10 @@ async def startup_event():
     # Start broadcast task for real-time updates
     broadcast_task_handle = asyncio.create_task(broadcast_updates_task())
     
-    logger.info("[STARTUP] Background tasks started successfully")
+    # Start auto-trading scheduler
+    scheduler_task_handle = asyncio.create_task(auto_trading_scheduler())
+    
+    logger.info("[STARTUP] Background tasks started successfully (including auto-trading scheduler)")
 
 
 # Trading loop background task

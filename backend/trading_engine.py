@@ -57,6 +57,10 @@ class TradingEngine:
         self.last_reset_date = None  # Track last daily reset
         self.last_pnl_reset_date = None  # Track last daily PNL reset
         
+        # Track last pullback signal to prevent frequent triggers
+        self.last_pullback_signal_time: Optional[dt.datetime] = None
+        self.last_pullback_direction: Optional[str] = None  # "CE" or "PE"
+        
         # Configure logging to ensure output to stdout
         self.logger.setLevel(logging.DEBUG)
         if not self.logger.handlers:
@@ -100,7 +104,25 @@ class TradingEngine:
             "trail_giveback_pct": 0.03,  # Reduced from 0.05 to 0.03 (3% instead of 5%)
             "dynamic_atr_multiplier": 0.85,  # Use 85% of ATR for tighter dynamic SL
             "min_option_price": 150,  # Minimum acceptable option premium (helps avoid very cheap ATM options)
-            "max_option_price": 200   # Maximum acceptable option premium (to control risk per trade)
+            "max_option_price": 200,  # Maximum acceptable option premium (to control risk per trade)
+            "min_vwap_distance_pct": 0.15,  # Maximum distance from VWAP for crossover entries (0.15% = ~36 points on NIFTY)
+            
+            # Trending market entry strategies (toggleable)
+            "enable_crossover_entries": True,  # Original crossover strategy
+            "enable_pullback_entries": True,  # EMA pullback strategy
+            "enable_vwap_momentum_entries": False,  # VWAP momentum breakout strategy (off by default)
+            "enable_consecutive_pattern_entries": False,  # Consecutive HH/LL pattern strategy (off by default)
+            
+            # Pullback strategy parameters (EMA20 only)
+            "min_trend_separation_pct": 0.2,  # Minimum EMA separation to confirm trend (0.2% = strong trend)
+            "pullback_cooldown_minutes": 20,  # Minimum minutes between pullback signals (prevents frequent triggers)
+            
+            # VWAP momentum strategy parameters
+            "vwap_momentum_distance_pct": 0.3,  # Maximum distance from VWAP for momentum entries
+            
+            # Consecutive pattern strategy parameters
+            "consecutive_candles_required": 3,  # Number of consecutive candles required for pattern
+            "consecutive_vwap_distance_pct": 0.5  # Maximum distance from VWAP for consecutive pattern entries
         }
         
         for key, default_value in defaults.items():
@@ -283,6 +305,280 @@ class TradingEngine:
         elapsed_seconds = (dt.datetime.now(self.timezone) - last).total_seconds()
         return elapsed_seconds >= cooldown_min * 60
 
+    def detect_ema_pullback(self, spot_df_today: pd.DataFrame) -> tuple:
+        """
+        Detect EMA20 pullback entry opportunities in trending markets
+        
+        Strategy: Use EMA5 to confirm trend direction, enter when price interacts with EMA20
+        
+        Flexible Pullback Detection:
+        - Price penetrates EMA20 from above and closes back above it (bullish)
+        - Price penetrates EMA20 from below and closes back below it (bearish)
+        - Or price remains within EMA20 zone after penetration
+        
+        Logic:
+        - EMA5 vs EMA20 position determines trend (EMA5 only used for trend confirmation)
+        - Entry trigger: Price interacts with EMA20 (penetrates or stays within)
+        - More flexible than requiring exact crossover
+        
+        SAFEGUARDS AGAINST FREQUENT SIGNALS:
+        1. Minimum cooldown between pullback signals (20 minutes default)
+        2. Requires price to have moved away from EMA20 (not just hovering)
+        3. Checks trend strength via EMA separation
+        
+        Args:
+            spot_df_today: DataFrame with today's candles including EMAs
+            
+        Returns:
+            tuple: (signal_type, entry_reason) or (None, None)
+                   signal_type: "CE" or "PE"
+                   entry_reason: "pullback_ema20"
+        """
+        if len(spot_df_today) < 3:
+            return None, None
+        
+        # COOLDOWN CHECK: Prevent frequent pullback signals
+        pullback_cooldown_minutes = self.config.get("pullback_cooldown_minutes", 20)
+        if self.last_pullback_signal_time:
+            elapsed_minutes = (dt.datetime.now(self.timezone) - self.last_pullback_signal_time).total_seconds() / 60
+            if elapsed_minutes < pullback_cooldown_minutes:
+                self.logger.debug(f"[PULLBACK_CHECK] Pullback cooldown active ({elapsed_minutes:.1f}/{pullback_cooldown_minutes} min)")
+                return None, None
+        
+        current = spot_df_today.iloc[-1]
+        prev = spot_df_today.iloc[-2]
+        prev2 = spot_df_today.iloc[-3]  # Check price was away from EMA20
+        
+        ema5_current = current['EMA5']
+        ema20_current = current['EMA20']
+        ema20_prev = prev['EMA20']
+        ema20_prev2 = prev2['EMA20']
+        close_current = current['close']
+        close_prev = prev['close']
+        close_prev2 = prev2['close']
+        low_current = current['low']
+        high_current = current['high']
+        low_prev = prev['low']
+        high_prev = prev['high']
+        
+        # Calculate EMA separation (minimum threshold to confirm trend)
+        ema_separation_pct = abs(ema5_current - ema20_current) / ema20_current * 100
+        min_separation = self.config.get("min_trend_separation_pct", 0.2)
+        
+        self.logger.debug(f"[PULLBACK_CHECK] EMA5={ema5_current:.2f}, EMA20={ema20_current:.2f}, Separation={ema_separation_pct:.3f}%")
+        
+        # Check if EMAs are sufficiently separated (trending market)
+        if ema_separation_pct < min_separation:
+            self.logger.debug(f"[PULLBACK_CHECK] Insufficient EMA separation ({ema_separation_pct:.3f}% < {min_separation:.3f}%), not trending")
+            return None, None
+        
+        # UPTREND: EMA5 > EMA20 (trend confirmation only)
+        if ema5_current > ema20_current:
+            self.logger.debug(f"[PULLBACK_CHECK] UPTREND detected (EMA5 > EMA20)")
+            
+            # Check if price was away from EMA20 recently (not hovering)
+            if close_prev2 <= ema20_prev2:
+                self.logger.debug(f"[PULLBACK_CHECK] Price hovering around EMA20, skipping")
+                return None, None
+            
+            # FLEXIBLE PULLBACK DETECTION (mutually exclusive - first match wins):
+            # Case 1: Previous candle CLOSE penetrated below EMA20, current candle closes back above
+            # This is the strongest signal - clear crossover
+            if close_prev < ema20_prev and close_current > ema20_current:
+                self.logger.info(f"[PULLBACK_DETECTED] 🔵 Bullish EMA20 pullback (penetration & close above): Prev {close_prev:.2f} < EMA20 {ema20_prev:.2f}, Current {close_current:.2f} > EMA20 {ema20_current:.2f}")
+                self.logger.info(f"[PULLBACK_DETECTED] Trend confirmed by EMA5 ({ema5_current:.2f}) > EMA20 ({ema20_current:.2f})")
+                self.last_pullback_signal_time = dt.datetime.now(self.timezone)
+                self.last_pullback_direction = "CE"
+                return "CE", "pullback_ema20"
+            
+            # Case 2: Previous candle WICK touched EMA20 (low <= EMA20) but close stayed above, current also stays above
+            # Only trigger if Case 1 didn't match (previous close was NOT below EMA20)
+            elif close_prev >= ema20_prev and low_prev <= ema20_prev and close_current > ema20_current:
+                self.logger.info(f"[PULLBACK_DETECTED] 🔵 Bullish EMA20 pullback (prev wick touch): Prev low {low_prev:.2f} touched EMA20 {ema20_prev:.2f}, close {close_prev:.2f} held above, Current {close_current:.2f} > EMA20")
+                self.logger.info(f"[PULLBACK_DETECTED] Trend confirmed by EMA5 ({ema5_current:.2f}) > EMA20 ({ema20_current:.2f})")
+                self.last_pullback_signal_time = dt.datetime.now(self.timezone)
+                self.last_pullback_direction = "CE"
+                return "CE", "pullback_ema20"
+            
+            # Case 3: Current candle WICK touched EMA20 (low <= EMA20) and closed above
+            # Only trigger if Case 1 and Case 2 didn't match
+            elif close_prev > ema20_prev and low_current <= ema20_current and close_current > ema20_current:
+                self.logger.info(f"[PULLBACK_DETECTED] 🔵 Bullish EMA20 pullback (current wick touch): Low {low_current:.2f} touched EMA20 {ema20_current:.2f}, Close {close_current:.2f} held above")
+                self.logger.info(f"[PULLBACK_DETECTED] Trend confirmed by EMA5 ({ema5_current:.2f}) > EMA20 ({ema20_current:.2f})")
+                self.last_pullback_signal_time = dt.datetime.now(self.timezone)
+                self.last_pullback_direction = "CE"
+                return "CE", "pullback_ema20"
+        
+        # DOWNTREND: EMA5 < EMA20 (trend confirmation only)
+        elif ema5_current < ema20_current:
+            self.logger.debug(f"[PULLBACK_CHECK] DOWNTREND detected (EMA5 < EMA20)")
+            
+            # Check if price was away from EMA20 recently (not hovering)
+            if close_prev2 >= ema20_prev2:
+                self.logger.debug(f"[PULLBACK_CHECK] Price hovering around EMA20, skipping")
+                return None, None
+            
+            # FLEXIBLE PULLBACK DETECTION (mutually exclusive - first match wins):
+            # Case 1: Previous candle CLOSE penetrated above EMA20, current candle closes back below
+            # This is the strongest signal - clear crossover
+            if close_prev > ema20_prev and close_current < ema20_current:
+                self.logger.info(f"[PULLBACK_DETECTED] 🔴 Bearish EMA20 pullback (penetration & close below): Prev {close_prev:.2f} > EMA20 {ema20_prev:.2f}, Current {close_current:.2f} < EMA20 {ema20_current:.2f}")
+                self.logger.info(f"[PULLBACK_DETECTED] Trend confirmed by EMA5 ({ema5_current:.2f}) < EMA20 ({ema20_current:.2f})")
+                self.last_pullback_signal_time = dt.datetime.now(self.timezone)
+                self.last_pullback_direction = "PE"
+                return "PE", "pullback_ema20"
+            
+            # Case 2: Previous candle WICK touched EMA20 (high >= EMA20) but close stayed below, current also stays below
+            # Only trigger if Case 1 didn't match (previous close was NOT above EMA20)
+            elif close_prev <= ema20_prev and high_prev >= ema20_prev and close_current < ema20_current:
+                self.logger.info(f"[PULLBACK_DETECTED] 🔴 Bearish EMA20 pullback (prev wick touch): Prev high {high_prev:.2f} touched EMA20 {ema20_prev:.2f}, close {close_prev:.2f} held below, Current {close_current:.2f} < EMA20")
+                self.logger.info(f"[PULLBACK_DETECTED] Trend confirmed by EMA5 ({ema5_current:.2f}) < EMA20 ({ema20_current:.2f})")
+                self.last_pullback_signal_time = dt.datetime.now(self.timezone)
+                self.last_pullback_direction = "PE"
+                return "PE", "pullback_ema20"
+            
+            # Case 3: Current candle WICK touched EMA20 (high >= EMA20) and closed below
+            # Only trigger if Case 1 and Case 2 didn't match
+            elif close_prev < ema20_prev and high_current >= ema20_current and close_current < ema20_current:
+                self.logger.info(f"[PULLBACK_DETECTED] 🔴 Bearish EMA20 pullback (current wick touch): High {high_current:.2f} touched EMA20 {ema20_current:.2f}, Close {close_current:.2f} held below")
+                self.logger.info(f"[PULLBACK_DETECTED] Trend confirmed by EMA5 ({ema5_current:.2f}) < EMA20 ({ema20_current:.2f})")
+                self.last_pullback_signal_time = dt.datetime.now(self.timezone)
+                self.last_pullback_direction = "PE"
+                return "PE", "pullback_ema20"
+        
+        return None, None
+
+    def detect_vwap_momentum(self, spot_df_today: pd.DataFrame, fut_df: pd.DataFrame) -> tuple:
+        """
+        Detect VWAP momentum breakout entry opportunities
+        
+        Strategy: When market is trending (EMAs aligned) AND price breaks VWAP
+        in the trend direction, enter on momentum
+        
+        Args:
+            spot_df_today: DataFrame with today's spot candles
+            fut_df: DataFrame with futures data including VWAP
+            
+        Returns:
+            tuple: (signal_type, entry_reason) or (None, None)
+        """
+        if len(spot_df_today) < 2 or fut_df is None or len(fut_df) < 2:
+            return None, None
+        
+        current = spot_df_today.iloc[-1]
+        prev = spot_df_today.iloc[-2]
+        
+        fut_current = fut_df.iloc[-1]
+        fut_prev = fut_df.iloc[-2]
+        
+        ema5 = current['EMA5']
+        ema20 = current['EMA20']
+        close_current = current['close']
+        close_prev = prev['close']
+        
+        vwap_current = fut_current['VWAP']
+        vwap_prev = fut_prev['VWAP']
+        
+        # Check distance from VWAP (not too extended)
+        vwap_distance_pct = abs(close_current - vwap_current) / vwap_current * 100
+        max_distance = self.config.get("vwap_momentum_distance_pct", 0.3)
+        
+        self.logger.debug(f"[VWAP_MOMENTUM_CHECK] Close={close_current:.2f}, VWAP={vwap_current:.2f}, Distance={vwap_distance_pct:.3f}%")
+        
+        if vwap_distance_pct > max_distance:
+            self.logger.debug(f"[VWAP_MOMENTUM_CHECK] Too far from VWAP ({vwap_distance_pct:.3f}% > {max_distance:.3f}%)")
+            return None, None
+        
+        # BULLISH MOMENTUM: EMA5 > EMA20 AND price crosses above VWAP
+        if ema5 > ema20:
+            if close_prev <= vwap_prev and close_current > vwap_current:
+                self.logger.info(f"[VWAP_MOMENTUM_DETECTED] 🔵 Bullish VWAP breakout: Price crossed above VWAP {vwap_current:.2f} in uptrend")
+                return "CE", "vwap_momentum_bullish"
+        
+        # BEARISH MOMENTUM: EMA5 < EMA20 AND price crosses below VWAP
+        elif ema5 < ema20:
+            if close_prev >= vwap_prev and close_current < vwap_current:
+                self.logger.info(f"[VWAP_MOMENTUM_DETECTED] 🔴 Bearish VWAP breakdown: Price crossed below VWAP {vwap_current:.2f} in downtrend")
+                return "PE", "vwap_momentum_bearish"
+        
+        return None, None
+
+    def detect_consecutive_pattern(self, spot_df_today: pd.DataFrame, fut_df: pd.DataFrame) -> tuple:
+        """
+        Detect consecutive higher highs/lower lows pattern (strong momentum)
+        
+        Strategy: Identify strong trends with consecutive momentum candles
+        forming higher highs/lower lows pattern
+        
+        Args:
+            spot_df_today: DataFrame with today's spot candles
+            fut_df: DataFrame with futures data including VWAP
+            
+        Returns:
+            tuple: (signal_type, entry_reason) or (None, None)
+        """
+        required_candles = self.config.get("consecutive_candles_required", 3)
+        
+        if len(spot_df_today) < required_candles + 1:
+            return None, None
+        
+        current = spot_df_today.iloc[-1]
+        ema5 = current['EMA5']
+        ema20 = current['EMA20']
+        close_current = current['close']
+        
+        # Get last N candles for pattern check
+        last_candles = spot_df_today.tail(required_candles + 1)
+        
+        # Check distance from VWAP (not too extended)
+        if fut_df is not None and len(fut_df) > 0:
+            fut_current = fut_df.iloc[-1]
+            vwap_current = fut_current['VWAP']
+            vwap_distance_pct = abs(close_current - vwap_current) / vwap_current * 100
+            max_distance = self.config.get("consecutive_vwap_distance_pct", 0.5)
+            
+            if vwap_distance_pct > max_distance:
+                self.logger.debug(f"[CONSECUTIVE_CHECK] Too far from VWAP ({vwap_distance_pct:.3f}% > {max_distance:.3f}%)")
+                return None, None
+        
+        # Check for BULLISH pattern (consecutive higher highs and higher lows)
+        if ema5 > ema20 and close_current > ema5:
+            higher_highs = True
+            higher_lows = True
+            
+            for i in range(1, len(last_candles)):
+                curr_candle = last_candles.iloc[i]
+                prev_candle = last_candles.iloc[i-1]
+                
+                if curr_candle['high'] <= prev_candle['high']:
+                    higher_highs = False
+                if curr_candle['low'] <= prev_candle['low']:
+                    higher_lows = False
+            
+            if higher_highs and higher_lows:
+                self.logger.info(f"[CONSECUTIVE_DETECTED] 🔵 Bullish consecutive pattern: {required_candles} consecutive higher highs & higher lows")
+                return "CE", "consecutive_hh_hl"
+        
+        # Check for BEARISH pattern (consecutive lower highs and lower lows)
+        elif ema5 < ema20 and close_current < ema5:
+            lower_highs = True
+            lower_lows = True
+            
+            for i in range(1, len(last_candles)):
+                curr_candle = last_candles.iloc[i]
+                prev_candle = last_candles.iloc[i-1]
+                
+                if curr_candle['high'] >= prev_candle['high']:
+                    lower_highs = False
+                if curr_candle['low'] >= prev_candle['low']:
+                    lower_lows = False
+            
+            if lower_highs and lower_lows:
+                self.logger.info(f"[CONSECUTIVE_DETECTED] 🔴 Bearish consecutive pattern: {required_candles} consecutive lower highs & lower lows")
+                return "PE", "consecutive_lh_ll"
+        
+        return None, None
+
     def scan_and_maybe_enter_once(self) -> None:
         """Main scanning and entry logic - called only at 5-minute candle closes by main loop"""
         now_dt = dt.datetime.now(self.timezone)
@@ -461,8 +757,9 @@ class TradingEngine:
         prev_spot_debug = spot_df.iloc[-2]
         self.logger.info(f"[SCAN_EMA] DEBUG: iloc[-2] would show: EMA5={prev_spot_debug['EMA5']:.2f}, EMA20={prev_spot_debug['EMA20']:.2f} (OLD BUGGY METHOD)")
 
-        # EMA crossover signal with duplicate detection
+        # ========== MULTI-STRATEGY SIGNAL DETECTION ==========
         signal_side = None
+        entry_reason = None
         current_candle_time = spot_df['datetime'].iloc[-1]
         
         # Convert to naive datetime for comparison if needed
@@ -479,45 +776,94 @@ class TradingEngine:
             self.prev_ema20 = current_ema20
             return
         
-        # Detect crossover using stored previous values vs current values
-        if self.prev_ema5 <= self.prev_ema20 and current_ema5 > current_ema20:
-            signal_side = "CE"
-            self.last_signal_candle_time = current_candle_time  # Mark this candle as processed
-            self.logger.info(f"[SCAN_SIGNAL] 🔵 BULLISH EMA CROSSOVER DETECTED! EMA5 crossed above EMA20 - Signal: {signal_side}")
+        self.logger.info("[SCAN_STRATEGY] ========== Checking All Enabled Strategies ==========")
+        
+        # STRATEGY 1: EMA Crossover (Original - Reversal Detection)
+        if self.config.get("enable_crossover_entries", True):
+            self.logger.info("[SCAN_STRATEGY] Checking Strategy 1: EMA Crossover...")
             
-            # Send Telegram alert for bullish crossover
+            # Detect crossover using stored previous values vs current values
+            if self.prev_ema5 <= self.prev_ema20 and current_ema5 > current_ema20:
+                signal_side = "CE"
+                entry_reason = "crossover_bullish"
+                self.last_signal_candle_time = current_candle_time
+                self.logger.info(f"[SCAN_SIGNAL] 🔵 BULLISH EMA CROSSOVER DETECTED! EMA5 crossed above EMA20")
+                
+                # Send Telegram alert for bullish crossover
+                try:
+                    spot_ltp = last_spot["close"]
+                    atm = self.logic.round_to_50(spot_ltp)
+                    self.telegram.send_ema_crossover_alert(
+                        signal_side=signal_side,
+                        ema5=current_ema5,
+                        ema20=current_ema20,
+                        spot_ltp=spot_ltp,
+                        atm=atm
+                    )
+                except Exception as e:
+                    self.logger.error(f"[TELEGRAM] Failed to send bullish crossover alert: {e}")
+            elif self.prev_ema5 >= self.prev_ema20 and current_ema5 < current_ema20:
+                signal_side = "PE"
+                entry_reason = "crossover_bearish"
+                self.last_signal_candle_time = current_candle_time
+                self.logger.info(f"[SCAN_SIGNAL] 🔴 BEARISH EMA CROSSOVER DETECTED! EMA5 crossed below EMA20")
+                
+                # Send Telegram alert for bearish crossover
+                try:
+                    spot_ltp = last_spot["close"]
+                    atm = self.logic.round_to_50(spot_ltp)
+                    self.telegram.send_ema_crossover_alert(
+                        signal_side=signal_side,
+                        ema5=current_ema5,
+                        ema20=current_ema20,
+                        spot_ltp=spot_ltp,
+                        atm=atm
+                    )
+                except Exception as e:
+                    self.logger.error(f"[TELEGRAM] Failed to send bearish crossover alert: {e}")
+            else:
+                self.logger.info(f"[SCAN_STRATEGY] Strategy 1: No crossover detected")
+        
+        # STRATEGY 2: EMA Pullback (Trend Continuation)
+        if not signal_side and self.config.get("enable_pullback_entries", True):
+            self.logger.info("[SCAN_STRATEGY] Checking Strategy 2: EMA Pullback...")
+            signal_side, entry_reason = self.detect_ema_pullback(spot_df_today)
+            if signal_side:
+                self.logger.info(f"[SCAN_STRATEGY] Strategy 2: ✅ Pullback signal detected - {entry_reason}")
+        
+        # STRATEGY 3: VWAP Momentum (Breakout Detection) - needs futures data
+        if not signal_side and self.config.get("enable_vwap_momentum_entries", False):
+            self.logger.info("[SCAN_STRATEGY] Checking Strategy 3: VWAP Momentum...")
             try:
-                spot_ltp = last_spot["close"]
-                atm = self.logic.round_to_50(spot_ltp)
-                self.telegram.send_ema_crossover_alert(
-                    signal_side=signal_side,
-                    ema5=current_ema5,
-                    ema20=current_ema20,
-                    spot_ltp=spot_ltp,
-                    atm=atm
-                )
+                # We'll fetch fut_df later in the code, so we need to do it here too
+                fut_token, fut_symbol = self.logic.get_nifty_weekly_fut_token()
+                if fut_token:
+                    fut_df_temp = self.logic.fetch_fut_5m(fut_token)
+                    if fut_df_temp is not None and len(fut_df_temp) >= 10:
+                        fut_df_temp = self.logic.compute_vwap(fut_df_temp)
+                        signal_side, entry_reason = self.detect_vwap_momentum(spot_df_today, fut_df_temp)
+                        if signal_side:
+                            self.logger.info(f"[SCAN_STRATEGY] Strategy 3: ✅ VWAP momentum signal detected - {entry_reason}")
             except Exception as e:
-                self.logger.error(f"[TELEGRAM] Failed to send bullish crossover alert: {e}")
-        elif self.prev_ema5 >= self.prev_ema20 and current_ema5 < current_ema20:
-            signal_side = "PE"
-            self.last_signal_candle_time = current_candle_time  # Mark this candle as processed
-            self.logger.info(f"[SCAN_SIGNAL] 🔴 BEARISH EMA CROSSOVER DETECTED! EMA5 crossed below EMA20 - Signal: {signal_side}")
-            
-            # Send Telegram alert for bearish crossover
+                self.logger.warning(f"[SCAN_STRATEGY] Strategy 3: Error checking VWAP momentum: {e}")
+        
+        # STRATEGY 4: Consecutive Pattern (Strong Momentum Detection)
+        if not signal_side and self.config.get("enable_consecutive_pattern_entries", False):
+            self.logger.info("[SCAN_STRATEGY] Checking Strategy 4: Consecutive HH/LL Pattern...")
             try:
-                spot_ltp = last_spot["close"]
-                atm = self.logic.round_to_50(spot_ltp)
-                self.telegram.send_ema_crossover_alert(
-                    signal_side=signal_side,
-                    ema5=current_ema5,
-                    ema20=current_ema20,
-                    spot_ltp=spot_ltp,
-                    atm=atm
-                )
+                # Fetch fut_df if needed
+                fut_token, fut_symbol = self.logic.get_nifty_weekly_fut_token()
+                fut_df_temp = None
+                if fut_token:
+                    fut_df_temp = self.logic.fetch_fut_5m(fut_token)
+                    if fut_df_temp is not None and len(fut_df_temp) >= 10:
+                        fut_df_temp = self.logic.compute_vwap(fut_df_temp)
+                
+                signal_side, entry_reason = self.detect_consecutive_pattern(spot_df_today, fut_df_temp)
+                if signal_side:
+                    self.logger.info(f"[SCAN_STRATEGY] Strategy 4: ✅ Consecutive pattern signal detected - {entry_reason}")
             except Exception as e:
-                self.logger.error(f"[TELEGRAM] Failed to send bearish crossover alert: {e}")
-        else:
-            self.logger.info(f"[SCAN_EMA] No crossover - EMA5 {'above' if current_ema5 > current_ema20 else 'below'} EMA20 (diff: {abs(current_ema5 - current_ema20):.2f})")
+                self.logger.warning(f"[SCAN_STRATEGY] Strategy 4: Error checking consecutive pattern: {e}")
 
         # Store current EMA values for next cycle (CRITICAL: these will be "Previous" in next scan)
         self.logger.info(f"[SCAN_EMA] Storing for next cycle: EMA5={current_ema5:.2f}, EMA20={current_ema20:.2f}")
@@ -525,8 +871,10 @@ class TradingEngine:
         self.prev_ema20 = current_ema20
         
         if not signal_side:
-            self.logger.info("[SCAN] No EMA crossover signal this candle")
+            self.logger.info("[SCAN] ========== No signal from any enabled strategy ==========")
             return
+        
+        self.logger.info(f"[SCAN] ========== Signal Confirmed: {signal_side} via {entry_reason.upper()} ==========")
 
         # Get spot LTP and identify ATM option for trade planning
         try:
@@ -594,8 +942,10 @@ class TradingEngine:
         
         self.logger.info(f"[SCAN_ATR] ✅ ATR filter passed - Market volatile enough (ATR {last_spot['ATR']:.2f} >= {atr_threshold:.2f})")
 
-        # VWAP filter on NIFTY FUT
+        # VWAP filters on NIFTY FUT (Distance + Direction)
         try:
+            self.logger.info("[SCAN_VWAP] ========== VWAP Filters ==========")
+            
             fut_token, fut_symbol = self.logic.get_nifty_weekly_fut_token()
             if fut_token is None:
                 self.logger.error("[ERROR] Cannot proceed without NIFTY FUT token")
@@ -606,20 +956,54 @@ class TradingEngine:
                 self.logger.warning(f"[SCAN] Not enough FUT candles: {len(fut_df) if fut_df is not None else 0}/10")
                 return
             
-            # Note: Live candle injection removed - 3-second scan delay ensures API has processed completed candle
+            # Compute VWAP
             fut_df = self.logic.compute_vwap(fut_df)
             fut_last = fut_df.iloc[-1]
+            
+            # FILTER 1: VWAP Distance Filter - SKIP FOR PULLBACK ENTRIES
+            # Pullback entries don't need VWAP distance check as they're continuation trades in trending markets
+            is_pullback_entry = "pullback" in entry_reason.lower()
+            
+            if not is_pullback_entry:
+                spot_close = last_spot["close"]
+                vwap_value = fut_last["VWAP"]
+                vwap_distance_pct = abs(spot_close - vwap_value) / vwap_value * 100
+                
+                # Get configurable max distance (default 0.15% from config)
+                max_vwap_distance_pct = self.config.get("min_vwap_distance_pct", 0.15)
+                
+                self.logger.info(f"[SCAN_VWAP_DISTANCE] Spot Close: {spot_close:.2f}, VWAP: {vwap_value:.2f}")
+                self.logger.info(f"[SCAN_VWAP_DISTANCE] Distance: {vwap_distance_pct:.3f}% (Max allowed: {max_vwap_distance_pct:.3f}%)")
+                
+                # Reject if crossover is too far from VWAP
+                if vwap_distance_pct > max_vwap_distance_pct:
+                    self.logger.warning(f"[SCAN_VWAP_DISTANCE] ❌ Crossover too far from VWAP!")
+                    self.logger.warning(f"[SCAN_VWAP_DISTANCE] Distance {vwap_distance_pct:.3f}% > {max_vwap_distance_pct:.3f}% - Extended move detected")
+                    self.logger.warning(f"[SCAN_VWAP_DISTANCE] Skipping entry to avoid chasing price after large move")
+                    return
+                
+                self.logger.info(f"[SCAN_VWAP_DISTANCE] ✅ VWAP distance filter passed - Crossover near VWAP (within {max_vwap_distance_pct:.3f}%)")
+            else:
+                self.logger.info(f"[SCAN_VWAP_DISTANCE] ⏭️ SKIPPED for pullback entry - Pullback entries don't require VWAP distance check")
+            
+            # FILTER 2: VWAP Direction Filter - Ensure price is on correct side of VWAP
             vwap_direction_ok = (signal_side == "CE" and fut_last["close"] > fut_last["VWAP"]) or \
                                 (signal_side == "PE" and fut_last["close"] < fut_last["VWAP"])
             
-            self.logger.info(f"[SCAN_VWAP] FUT Close: {fut_last['close']:.2f}, VWAP: {fut_last['VWAP']:.2f}, Diff: {(fut_last['close'] - fut_last['VWAP']):.2f}")
-            self.logger.info(f"[SCAN_VWAP] Direction check: Signal={signal_side}, Close {'>' if fut_last['close'] > fut_last['VWAP'] else '<'} VWAP, Result: {'✅ PASS' if vwap_direction_ok else '❌ FAIL'}")
+            self.logger.info(f"[SCAN_VWAP_DIRECTION] FUT Close: {fut_last['close']:.2f}, VWAP: {fut_last['VWAP']:.2f}, Diff: {(fut_last['close'] - fut_last['VWAP']):.2f}")
+            self.logger.info(f"[SCAN_VWAP_DIRECTION] Direction check: Signal={signal_side}, Close {'>' if fut_last['close'] > fut_last['VWAP'] else '<'} VWAP, Result: {'✅ PASS' if vwap_direction_ok else '❌ FAIL'}")
 
             if not vwap_direction_ok:
-                self.logger.info(f"[SCAN_VWAP] ❌ VWAP filter failed - FUT price on wrong side of VWAP for {signal_side} signal")
+                self.logger.warning(f"[SCAN_VWAP_DIRECTION] ❌ VWAP direction filter failed - FUT price on wrong side of VWAP for {signal_side} signal")
                 return
             
-            self.logger.info(f"[SCAN_VWAP] ✅ VWAP filter passed")
+            self.logger.info(f"[SCAN_VWAP_DIRECTION] ✅ VWAP direction filter passed")
+            
+            # Summary message based on entry type
+            if is_pullback_entry:
+                self.logger.info("[SCAN_VWAP] ========== VWAP direction filter passed (distance check skipped for pullback) ==========")
+            else:
+                self.logger.info("[SCAN_VWAP] ========== Both VWAP filters passed ==========")
         except Exception as e:
             self.logger.error(f"[ERROR] FUT VWAP calc failed: {e}", exc_info=True)
             if self.notify:
@@ -656,15 +1040,16 @@ class TradingEngine:
             return
 
         self.logger.info(f"[SCAN_ENTRY] 🎯 ALL FILTERS PASSED! Executing entry for {tsym} at ₹{entry_ltp:.2f}")
-        self.log_trade(tsym, "BUY", entry_ltp, status="PLANNED", note="signal (spot EMA + FUT VWAP)")
+        self.logger.info(f"[SCAN_ENTRY] 📋 Entry Strategy: {entry_reason.upper()}")
+        self.log_trade(tsym, "BUY", entry_ltp, status="PLANNED", note=f"{entry_reason} (spot EMA + FUT VWAP filters passed)")
         atr_value = spot_df["ATR"].iloc[-1]
         lot_qty = self.config.get("lot_qty", 75)
         
-        self.logger.info(f"[SCAN_ENTRY] Order details - Symbol: {tsym}, Price: {entry_ltp:.2f}, Qty: {lot_qty}, ATR: {atr_value:.2f}")
+        self.logger.info(f"[SCAN_ENTRY] Order details - Symbol: {tsym}, Price: {entry_ltp:.2f}, Qty: {lot_qty}, ATR: {atr_value:.2f}, Strategy: {entry_reason}")
 
         # Place real market order
         try:
-            self.logger.info(f"[ORDER] Placing BUY order for {tsym}...")
+            self.logger.info(f"[ORDER] Placing BUY order for {tsym} (Strategy: {entry_reason})...")
             order_id = self.kite.place_order(
                 variety=self.kite.VARIETY_REGULAR,
                 exchange=self.kite.EXCHANGE_NFO,
@@ -675,18 +1060,18 @@ class TradingEngine:
                 product=self.kite.PRODUCT_MIS
             )
             self.add_position(tsym, entry_ltp, lot_qty, atr=atr_value)
-            self.log_trade(tsym, "BUY", entry_ltp, status="SUCCESS", note=f"filled - Order ID: {order_id}")
+            self.log_trade(tsym, "BUY", entry_ltp, status="SUCCESS", note=f"{entry_reason} - filled, Order ID: {order_id}")
             self.entered_symbols_today.add(tsym)
             self.last_global_entry_time = dt.datetime.now(self.timezone)
             
             if self.notify:
                 try:
-                    self.notify("order_executed", {"symbol": tsym, "action": "BUY", "price": entry_ltp, "qty": lot_qty, "order_id": order_id})
+                    self.notify("order_executed", {"symbol": tsym, "action": "BUY", "price": entry_ltp, "qty": lot_qty, "order_id": order_id, "strategy": entry_reason})
                 except Exception as notify_error:
                     self.logger.error(f"[NOTIFY] Failed to send order_executed notification: {notify_error}")
         except Exception as e:
             self.logger.error(f"[ORDER_FAILED] BUY {tsym}: {e}", exc_info=True)
-            self.log_trade(tsym, "BUY", entry_ltp, status="FAILED", note=str(e))
+            self.log_trade(tsym, "BUY", entry_ltp, status="FAILED", note=f"{entry_reason} - {str(e)}")
             if self.notify:
                 try:
                     self.notify("order_failed", {"symbol": tsym, "action": "BUY", "error": str(e)})
