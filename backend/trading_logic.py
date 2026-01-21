@@ -155,11 +155,15 @@ class TradingLogic:
         TradingLogic.logger.info(f"[OPTION_FINDER] Searching for {option_type} option in range ₹{min_price}-₹{max_price}")
         TradingLogic.logger.info(f"[OPTION_FINDER] ATM Strike: {atm_strike}, Spot: {spot_ltp:.2f}")
         
-        # Prepare strikes to check: ATM + ITM options
+        # Prepare strikes to check: ATM + both ITM and OTM options for better coverage
         if option_type == "CE":
-            strikes = [atm_strike] + [atm_strike - (i * 50) for i in range(1, 6)]  # ATM + 5 ITM strikes
+            # CE: ITM = below ATM, OTM = above ATM
+            strikes = [atm_strike] + [atm_strike - (i * 50) for i in range(1, 8)] + [atm_strike + (i * 50) for i in range(1, 4)]
         else:  # PE
-            strikes = [atm_strike] + [atm_strike + (i * 50) for i in range(1, 6)]  # ATM + 5 ITM strikes
+            # PE: ITM = above ATM, OTM = below ATM
+            strikes = [atm_strike] + [atm_strike + (i * 50) for i in range(1, 8)] + [atm_strike - (i * 50) for i in range(1, 4)]
+        
+        TradingLogic.logger.info(f"[OPTION_FINDER] Checking strikes: {sorted(strikes)}")
         
         # PHASE 1: Batch lookup and fetch for current expiry (FAST - single API call)
         instruments_to_fetch = []
@@ -178,7 +182,17 @@ class TradingLogic:
                 ltp_batch = self.kite.ltp(instruments_to_fetch)
                 TradingLogic.logger.info(f"[OPTION_FINDER] Batch fetched {len(ltp_batch)} option prices in single API call")
                 
-                # Check prices in order (ATM first, then ITM)
+                # Log all fetched prices for debugging
+                prices_found = []
+                for nfo_key in instruments_to_fetch:
+                    if nfo_key in ltp_batch:
+                        strike, tsym, token = strike_map[nfo_key]
+                        price = ltp_batch[nfo_key]["last_price"]
+                        prices_found.append(f"{tsym}@₹{price:.2f}")
+                
+                TradingLogic.logger.info(f"[OPTION_FINDER] All prices: {', '.join(prices_found)}")
+                
+                # Check prices in order (ATM first, then ITM, then OTM)
                 for nfo_key in instruments_to_fetch:
                     if nfo_key in ltp_batch:
                         strike, tsym, token = strike_map[nfo_key]
@@ -186,13 +200,21 @@ class TradingLogic:
                         
                         if min_price <= price <= max_price:
                             distance = abs(strike - atm_strike)
-                            position_type = "ATM" if distance == 0 else f"ITM-{distance}"
-                            TradingLogic.logger.info(f"[OPTION_FINDER] ✅ Found {position_type}: {tsym} @ ₹{price:.2f}")
+                            moneyness = "ATM" if distance == 0 else ("ITM" if (option_type == "CE" and strike < atm_strike) or (option_type == "PE" and strike > atm_strike) else "OTM")
+                            TradingLogic.logger.info(f"[OPTION_FINDER] ✅ Found {moneyness}-{distance}: {tsym} @ ₹{price:.2f}")
                             return tsym, token, price, strike
-                        
-                        TradingLogic.logger.debug(f"[OPTION_FINDER] {tsym} @ ₹{price:.2f} - outside range")
+                
+                # If nothing found, log summary
+                if prices_found:
+                    all_prices = [ltp_batch[k]["last_price"] for k in instruments_to_fetch if k in ltp_batch]
+                    TradingLogic.logger.warning(f"[OPTION_FINDER] ❌ None in range ₹{min_price}-₹{max_price}. Prices found: ₹{min(all_prices):.2f} to ₹{max(all_prices):.2f}")
+                else:
+                    TradingLogic.logger.warning(f"[OPTION_FINDER] ❌ No prices returned from API for current expiry")
+                    
             except Exception as e:
                 TradingLogic.logger.warning(f"[OPTION_FINDER] Batch LTP failed, falling back: {e}")
+        else:
+            TradingLogic.logger.warning(f"[OPTION_FINDER] ❌ No instruments found for strikes: {strikes}")
         
         # PHASE 2: Try next expiry only if current expiry failed (rare case)
         TradingLogic.logger.info(f"[OPTION_FINDER] Current expiry unsuitable, checking next expiry...")
@@ -215,6 +237,16 @@ class TradingLogic:
                 ltp_batch = self.kite.ltp(instruments_to_fetch)
                 TradingLogic.logger.info(f"[OPTION_FINDER] Next expiry: batch fetched {len(ltp_batch)} prices")
                 
+                # Log all next expiry prices
+                next_prices_found = []
+                for nfo_key in instruments_to_fetch:
+                    if nfo_key in ltp_batch:
+                        strike, tsym, token = strike_map[nfo_key]
+                        price = ltp_batch[nfo_key]["last_price"]
+                        next_prices_found.append(f"{tsym}@₹{price:.2f}")
+                
+                TradingLogic.logger.info(f"[OPTION_FINDER] Next expiry prices: {', '.join(next_prices_found)}")
+                
                 for nfo_key in instruments_to_fetch:
                     if nfo_key in ltp_batch:
                         strike, tsym, token = strike_map[nfo_key]
@@ -222,13 +254,21 @@ class TradingLogic:
                         
                         if min_price <= price <= max_price:
                             distance = abs(strike - atm_strike)
-                            position_type = "ATM" if distance == 0 else f"ITM-{distance}"
-                            TradingLogic.logger.info(f"[OPTION_FINDER] ✅ Next expiry {position_type}: {tsym} @ ₹{price:.2f}")
+                            moneyness = "ATM" if distance == 0 else ("ITM" if (option_type == "CE" and strike < atm_strike) or (option_type == "PE" and strike > atm_strike) else "OTM")
+                            TradingLogic.logger.info(f"[OPTION_FINDER] ✅ Next expiry {moneyness}-{distance}: {tsym} @ ₹{price:.2f}")
                             return tsym, token, price, strike
+                
+                # Log summary if nothing found
+                if next_prices_found:
+                    all_next_prices = [ltp_batch[k]["last_price"] for k in instruments_to_fetch if k in ltp_batch]
+                    TradingLogic.logger.warning(f"[OPTION_FINDER] Next expiry: None in range. Prices: ₹{min(all_next_prices):.2f} to ₹{max(all_next_prices):.2f}")
+                    
             except Exception as e:
                 TradingLogic.logger.warning(f"[OPTION_FINDER] Next expiry batch failed: {e}")
+        else:
+            TradingLogic.logger.warning(f"[OPTION_FINDER] ❌ No instruments found for next expiry")
         
-        TradingLogic.logger.warning(f"[OPTION_FINDER] ❌ No option found in range ₹{min_price}-₹{max_price}")
+        TradingLogic.logger.warning(f"[OPTION_FINDER] ❌ FINAL: No option found in range ₹{min_price}-₹{max_price} across both expiries")
         return None, None, None, None
     
     def get_next_next_expiry(self, current_expiry: dt.date) -> dt.date:
